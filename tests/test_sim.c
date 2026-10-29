@@ -121,10 +121,12 @@ static void test_damping(void)
 static int cmp_dbl(const void *a, const void *b)
 { double x = *(const double *)a, y = *(const double *)b; return (x > y) - (x < y); }
 
-static void run_dispersion(Boundary bc, int diag, double prestrain, int exact, const char *label)
+static void run_dispersion_r(Boundary bc, int diag, double prestrain, int rods, int exact, double wscale,
+                             double thr, const char *label)
 {
     Params p = base(32, bc, diag);
     p.prestrain = prestrain;
+    p.rod_card = rods & 1; p.rod_diag = (rods >> 1) & 1;
     p.nt = 512;
     Sim s; sim_init(&s, &p);
     Spectrum sp; spectrum_init(&sp, &s);
@@ -133,6 +135,7 @@ static void run_dispersion(Boundary bc, int diag, double prestrain, int exact, c
      * their second-order stretching shows up as low-frequency power */
     for (int i = 0; i < s.n; i++)
         if (!s.fixed[i]) { s.ux[i] = 1e-4 * rng_sym(&s.rng); s.uy[i] = 1e-4 * rng_sym(&s.rng); }
+    sim_project(&s);
     sim_compute_forces(&s);
     while (sp.nsamp < sp.nt) { sim_step(&s); spectrum_after_step(&sp, &s); }
     int w, h; spectrum_disp_image(&sp, POL_L, &w, &h);   /* forces compute */
@@ -141,8 +144,8 @@ static void run_dispersion(Boundary bc, int diag, double prestrain, int exact, c
     int checked = 0, bad = 0; double worst = 0, rel[2048];
     for (int b = 0; b < 2; b++)
         for (int ix = 1; ix < sp.nlq; ix++) {
-            double wa = b == 0 ? sp.wL[ix] : sp.wT[ix];
-            if (wa < 3 * bin) continue;                  /* too close to DC */
+            double wa = (b == 0 ? sp.wL[ix] : sp.wT[ix]) * wscale;
+            if (!isfinite(wa) || wa < 3 * bin) continue;  /* frozen, or too close to DC */
             int best = 0; double pmax = -1;
             for (int iw = 1; iw <= sp.nt / 2; iw++) {
                 double v = sp.dpow[b][(size_t)iw * sp.nlq + ix];
@@ -159,9 +162,14 @@ static void run_dispersion(Boundary bc, int diag, double prestrain, int exact, c
         CHECK(bad == 0 && checked > 0, "%-38s %d peaks, worst |dw| = %.2f bins",
               label, checked, worst);
     else
-        CHECK(median < 0.05 && checked > 0, "%-38s %d peaks, median |dw|/w = %.1f%% (approximate basis)",
-              label, checked, 100 * median);
+        CHECK(median < thr && checked > 0, "%-38s %d peaks, median |dw|/w = %.2f%% (limit %.1f%%)",
+              label, checked, 100 * median, 100 * thr);
     spectrum_free(&sp); sim_free(&s);
+}
+
+static void run_dispersion(Boundary bc, int diag, double prestrain, int exact, const char *label)
+{
+    run_dispersion_r(bc, diag, prestrain, 0, exact, 1.0, 0.05, label);
 }
 
 static void test_dispersion(void)
@@ -173,6 +181,71 @@ static void test_dispersion(void)
     run_dispersion(BC_FREE,     0, 0.00, 1, "free (DCT), cardinal");
     run_dispersion(BC_FREE,     1, 0.00, 0, "free (DCT), + diagonal");
     run_dispersion(BC_CLAMPED,  0, 0.08, 1, "clamped (DST), cardinal, prestrain 8%");
+    /* free + cardinal rods: each column is rigid and includes the two edge
+     * nodes, which have half the diagonal bonds, so the column stiffness is
+     * (R-1) k_d rather than R k_d: omega = sqrt((R-1)/R) x bulk value */
+    run_dispersion_r(BC_FREE,   1, 0.00, 1, 0, sqrt(31.0 / 32.0), 0.006, "free, card. RODS, w x sqrt((R-1)/R)");
+    run_dispersion_r(BC_FREE,   1, 0.00, 1, 0, 1.0, 0.05, "  same, bulk formula (expect ~1.6%)");
+    run_dispersion_r(BC_PINNED, 1, 0.00, 1, 0, 1.0, 0.05, "pinned, cardinal RODS + diag springs");
+}
+
+/* rods: constraints hold, energy is conserved, blocked moves are refused */
+static double max_rod_err(const Sim *s)
+{
+    double worst = 0;
+    for (int k = 0; k < s->nspr; k++) {
+        const Spring *sp = &s->spr[k];
+        if (!sp->rod) continue;
+        double dx = sp->rx + s->ux[sp->b] - s->ux[sp->a], dy = sp->ry + s->uy[sp->b] - s->uy[sp->a];
+        double e = fabs(sqrt(dx * dx + dy * dy) - sp->L0) / sp->L0;
+        if (e > worst) worst = e;
+    }
+    return worst;
+}
+
+static void test_rods(void)
+{
+    printf("rigid rods (RATTLE)\n");
+    struct { int card, diag, bc; const char *name; } cases[] = {
+        { 1, 0, BC_FREE,   "free, cardinal rods + diag springs" },
+        { 0, 1, BC_FREE,   "free, diagonal rods + card springs" },
+        { 1, 0, BC_PINNED, "pinned, cardinal rods + diag springs" },
+    };
+    for (int c = 0; c < 3; c++) {
+        Params p = base(32, cases[c].bc, 1);
+        p.rod_card = cases[c].card; p.rod_diag = cases[c].diag;
+        Sim s; sim_init(&s, &p);
+        sim_displace(&s, sim_idx(&s, 16, 16), 0.0, -1.0);
+        sim_kick_random(&s, 1.0, 1.0);
+        double ke, pe; sim_energy(&s, &ke, &pe);
+        double E0 = ke + pe, worst = 0, rerr = 0; int maxit = 0;
+        for (int i = 0; i < 40000; i++) {
+            sim_step(&s);
+            if (s.rod_iters > maxit) maxit = s.rod_iters;
+            if (i % 200 == 0) {
+                sim_energy(&s, &ke, &pe);
+                double d = fabs(ke + pe - E0) / E0; if (d > worst) worst = d;
+                double r = max_rod_err(&s); if (r > rerr) rerr = r;
+            }
+        }
+        CHECK(worst < 2e-4 && rerr < 1e-8, "%-38s |dE|/E %.1e, rod length err %.1e, max SHAKE sweeps %d",
+              cases[c].name, worst, rerr, maxit);
+        sim_free(&s);
+    }
+    /* clamped edges + cardinal rods: every row is a taut chain -> locked */
+    Params p = base(16, BC_CLAMPED, 1);
+    p.rod_card = 1;
+    Sim s; sim_init(&s, &p);
+    int r = sim_displace(&s, sim_idx(&s, 8, 8), 0.0, -0.5);
+    double u = 0; for (int i = 0; i < s.n; i++) u += fabs(s.ux[i]) + fabs(s.uy[i]);
+    CHECK(r == -1 && u == 0.0, "clamped + cardinal rods: pluck refused (%d), state untouched", r);
+    /* a drag the rods forbid: the step is undone, nothing moves, no NaN */
+    s.held = sim_idx(&s, 8, 8); s.held_ux = 0.0; s.held_uy = -0.3; s.held_vx = s.held_vy = 0.0;
+    int blocked = 0;
+    for (int i = 0; i < 100; i++) { sim_step(&s); blocked |= s.rod_blocked; }
+    u = 0; for (int i = 0; i < s.n; i++) u += fabs(s.ux[i]) + fabs(s.uy[i]);
+    CHECK(blocked && u == 0.0, "clamped + cardinal rods: forbidden drag blocked, state finite");
+    sim_free(&s);
 }
 
 /* 5. a small clamped T mode stays in its mode */
@@ -277,6 +350,26 @@ static void test_absorb(void)
     CHECK(off > 0.99 && on < 0.01, "no layer %.3f, with layer %.4f", off, on);
 }
 
+/* 7b. random kicks carry no net momentum or angular momentum (free) */
+static void test_kick(void)
+{
+    printf("random kick: no net momentum / angular momentum (free BC)\n");
+    Params p = base(16, BC_FREE, 1);
+    Sim s; sim_init(&s, &p);
+    sim_displace(&s, sim_idx(&s, 3, 5), 0.3, 0.2);
+    sim_kick_random(&s, 5.0, 5.0);
+    double px = 0, py = 0, Lz = 0, cx = 0, cy = 0, M = 0, vs = 0;
+    for (int i = 0; i < s.n; i++) { M += s.m[i]; cx += s.m[i] * (i % 16 + s.ux[i]); cy += s.m[i] * (i / 16 + s.uy[i]); }
+    cx /= M; cy /= M;
+    for (int i = 0; i < s.n; i++) {
+        double x = i % 16 + s.ux[i] - cx, y = i / 16 + s.uy[i] - cy;
+        px += s.m[i] * s.vx[i]; py += s.m[i] * s.vy[i]; Lz += s.m[i] * (x * s.vy[i] - y * s.vx[i]);
+        vs += fabs(s.vx[i]) + fabs(s.vy[i]);
+    }
+    CHECK(fabs(px) + fabs(py) < 1e-9 * vs && fabs(Lz) < 1e-9 * vs * 16, "P = (%.1e, %.1e), Lz = %.1e", px, py, Lz);
+    sim_free(&s);
+}
+
 /* 8. throw-velocity fit */
 static void test_throw(void)
 {
@@ -302,10 +395,12 @@ int main(int argc, char **argv)
     test_energy();
     test_damping();
     test_dispersion();
+    test_rods();
     test_mode_purity();
     test_fput();
     test_defect();
     test_absorb();
+    test_kick();
     test_throw();
     printf(failures ? "\n%d FAILED\n" : "\nall passed\n", failures);
     return failures ? 1 : 0;

@@ -5,7 +5,8 @@ spectral diagnostics that can be checked against the analytic dispersion
 relation.
 
 An N×M grid of point masses is connected by Hookean springs: cardinal
-springs, plus optional diagonal (shear) springs. You can pull and throw
+springs, plus optional diagonal (shear) springs. Either family can be made
+of rigid rods instead. You can pull and throw
 masses, switch boundary conditions, prestress the lattice, add mass defects
 or disorder, and absorb outgoing waves at the edges. Four spectral views
 show where the energy sits and how it moves: mode occupation, the ω–q
@@ -24,6 +25,9 @@ dispersion, the energy in each mode over time, and the total energy.
   monitor's refresh rate.
 - **Four boundary conditions.** Free, pinned, clamped and periodic, each paired with the
   spectral basis that matches it.
+- **Rigid rods.** Cardinal and/or diagonal bonds can be inextensible rods,
+  enforced as constraints with RATTLE. They store no energy, show their load in
+  colour, and do not limit Δt.
 - **Prestress (tension).** Gives the cardinal-only lattice a nonzero transverse stiffness.
 - **Disorder.** A light mass defect (which has a localised mode above the band), a heavy
   defect, or random masses.
@@ -73,6 +77,8 @@ make clean
 ./spring_grid --bc clamped --no-diag --prestrain 0.05   # a drum: tension gives
                                                         # transverse stiffness
 ./spring_grid --disorder light --absorb         # localised mode survives the absorber
+./spring_grid -c 32 -r 32 --rod-cardinal        # rigid rows/columns, diagonal springs
+./spring_grid --rod-cardinal --dt 2e-3          # 64x64 with rods at ~real time
 ./spring_grid --help
 ```
 
@@ -83,6 +89,7 @@ make clean
 | `-k, --k K` | 400 | cardinal spring constant, N per lattice unit |
 | `--kdiag K` | = k | diagonal spring constant |
 | `--no-diag` | | start with the diagonal springs off |
+| `--rod-cardinal` / `--rod-diagonal` | off | make that bond family rigid rods |
 | `-b, --bc NAME` | free | `free`, `pinned`, `clamped` or `periodic` |
 | `--prestrain E` | 0 | rest length L0 = (1−E)·\|r\|; takes effect only under clamped or periodic |
 | `-g, --damping G` | 0.4 | uniform drag, kg/s |
@@ -103,13 +110,15 @@ make clean
 
 | Input | Action |
 |---|---|
-| Left-drag | Grab a mass; release to throw it (release velocity is a least-squares fit over the last 80 ms) |
-| Right-click | Random velocity kick |
+| Left-drag | Grab a mass; release to throw it. The grabbed mass moves smoothly to the pointer over each frame's substeps, and the release velocity is a least-squares fit over the last 80 ms |
+| Right-click | Random velocity kick (net momentum removed; net angular momentum too, under free edges) |
 | Space | Pluck the centre mass |
 | G | Large random kick |
 | R | Reset to equilibrium |
 | B | Cycle boundary condition: free → pinned → clamped → periodic |
-| D | Diagonal springs on/off |
+| D | Diagonal bonds on/off |
+| C | Cardinal bonds: springs ↔ rigid rods |
+| X | Diagonal bonds: springs ↔ rigid rods |
 | T | Cycle prestrain: 0 / 2 / 5 / 10 % |
 | M | Cycle masses: uniform / light defect / heavy defect / random |
 | A | Absorbing layer on/off |
@@ -210,6 +219,52 @@ simulator's linearised forces, to about 10⁻¹⁰.
 - *Clamped:* edge nodes are held fixed (Dirichlet).
 - *Periodic:* a torus. Wrap-around springs are not drawn.
 
+**Rigid rods.** A rod imposes |r + u_b − u_a| = |r| exactly. Each step is
+RATTLE:
+
+1. SHAKE corrects the drifted positions along the bond vectors from the start
+   of the step, and puts the same correction divided by Δt into the
+   velocities.
+2. After the final kick, a velocity projection removes any component that
+   would change a rod's length.
+
+RATTLE keeps the scheme symplectic, so energy is still conserved to about
+4×10⁻⁵ over 20 s in the tests. Rods carry no potential energy.
+
+On this lattice the rods of one family form straight chains (rows, columns,
+or diagonals). Consecutive rods in a chain share a node, so the linearised
+constraint equations are tridiagonal and each chain is solved exactly. The
+solver sweeps chain family by chain family until every length is within
+5×10⁻⁹ a. That takes 3–5 sweeps per step when the lattice is undisturbed,
+and up to 30 while you drag. (Plain pointwise SHAKE needed about 600.)
+
+Speed: 32×32 runs faster than real time. 64×64 manages about 0.3× at the
+default Δt. Because rods don't limit the timestep, `--dt 2e-3` brings 64×64
+to about real time, with energy error around 5×10⁻⁴.
+
+Rods change the physics in these ways:
+- **Linear constraints.** A rod family with bond r forces n̂·ũ = 0 whenever
+  q·r ≢ 0 (mod 2π).
+  - With cardinal rods, on the qy = 0 line the L branch is frozen and only the
+    T branch survives (ω = ∞ for L). Off the axes, both branches are frozen.
+  - The analytic overlay and the mode energies use these constrained
+    branches.
+- **Rigid columns.** With cardinal rods and free edges, each column moves as a
+  rigid unit. Its edge nodes have half the diagonal bonds, so the column
+  stiffness is (R−1)·k_d rather than R·k_d, and ω_T is √((R−1)/R) times the
+  bulk value. The measured peaks sit 1.6% low at R = 32, and match the
+  corrected formula to 0.2%.
+- **Clamped or periodic + cardinal rods: the lattice locks.** Every row is an
+  inextensible chain spanning a fixed length, so it cannot move at all.
+  - Plucks and drags the rods forbid are refused and the state is restored.
+    The state panel shows "motion blocked by rods".
+  - Toggling rods on a deformed lattice first projects the state onto the
+    constraints. If that is impossible, the lattice is reset to rest.
+- **Load colouring.** A rod's colour shows its constraint force, the Lagrange
+  multiplier, as an equivalent spring strain f/(kL0): red for tension, blue
+  for compression.
+- **Prestress** applies to springs only. Rods keep their reference length.
+
 **Prestress** sets L0 = (1−e)|r|. It applies only under clamped and periodic
 boundaries, because free edges would simply contract to the rest length.
 
@@ -256,6 +311,9 @@ src/render.[ch]    SDL drawing (batched geometry), layout, panels
 src/font.[ch]      5x7 bitmap font
 src/main.c         window, event handling, fixed-timestep loop
 tests/test_sim.c   headless tests (make test)
+
+The rod solver (chains, Thomas algorithm, RATTLE) is in sim.c, after the
+integrator.
 ```
 
 ### Scripted runs

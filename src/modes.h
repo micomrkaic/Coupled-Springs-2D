@@ -23,6 +23,12 @@
  * overlap with q-hat is labelled quasi-longitudinal (L), the other quasi-
  * transverse (T).  Without diagonal springs or tension the eigenvectors
  * are x-hat and y-hat for every q, and omega_T = 0 along the axes.
+ *
+ * Rigid rods: a rod family with bond r imposes (e^{iq.r} - 1) n.u~ = 0,
+ * i.e. n.u~ = 0 whenever q.r is not a multiple of 2 pi.  If the active
+ * constraints leave one allowed direction t, that branch has
+ * omega^2 = t^T D t and the other is frozen (omega = +inf); if they span
+ * the plane, both are frozen.
  */
 #ifndef MODES_H
 #define MODES_H
@@ -41,10 +47,12 @@ typedef struct {
     double tc, td;     /* tension / bond length, cardinal & diagonal */
     double m;          /* mass used for the analytic curves          */
     int    diag;
+    int    rod_card, rod_diag;
 } Lattice;
 
 void dynmat(const Lattice *L, double qx, double qy, double D[3]);   /* xx, yy, xy */
-/* w[0], e[0] = quasi-L; w[1], e[1] = quasi-T = e[0] rotated by +90 deg */
+/* w[0], e[0] = quasi-L; w[1], e[1] = quasi-T = e[0] rotated by +90 deg;
+ * a branch frozen by rods has w = INFINITY */
 void branches(const Lattice *L, double qx, double qy, double w[2], double e[2][2]);
 double band_top(const Lattice *L);                 /* max omega over q */
 

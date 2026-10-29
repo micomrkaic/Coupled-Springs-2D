@@ -28,6 +28,7 @@ typedef struct {
     Renderer  R;
     UiState   ui;
     MotionLog mlog;
+    double    tgt_ux, tgt_uy;   /* drag target (displacement of the held node) */
     double    saved_damping;
     int       running;
 } App;
@@ -53,11 +54,14 @@ static void mark_event(App *a)
     a->ui.E0 = ke + pe;
 }
 
-static void structural_change(App *a)
+/* returns 1 if the rods forced a reset (and the toast says so) */
+static int structural_change(App *a)
 {
-    sim_rebuild(&a->sim);
+    int reset = sim_rebuild(&a->sim);
+    if (reset) toast(a, "rods could not hold this state: reset to the rest lattice");
     if (spectrum_rebuild(&a->sp, &a->sim)) { fprintf(stderr, "spectrum: out of memory\n"); exit(1); }
     mark_event(a);
+    return reset;
 }
 
 static int can_periodic(const Sim *s) { return s->cols % 2 == 0 && s->rows % 2 == 0; }
@@ -79,7 +83,8 @@ static void handle_key(App *a, SDL_Keycode key, Uint16 mod)
         sim_reset(s); spectrum_clear_history(&a->sp, s); mark_event(a);
         break;
     case SDLK_SPACE:
-        sim_displace(s, sim_idx(s, s->cols / 2, s->rows / 2), 0.0, -2.0);
+        if (sim_displace(s, sim_idx(s, s->cols / 2, s->rows / 2), 0.0, -2.0))
+            toast(a, "pluck blocked: the rods cannot accommodate it");
         mark_event(a);
         break;
     case SDLK_g:
@@ -91,14 +96,25 @@ static void handle_key(App *a, SDL_Keycode key, Uint16 mod)
         Boundary bc = p->bc;
         do bc = (Boundary)((bc + 1) % BC_COUNT); while (bc == BC_PERIODIC && !can_periodic(s));
         p->bc = bc;
-        structural_change(a);
+        if (structural_change(a)) break;
         toast(a, "boundary: %s%s", bc_name(bc),
               bc == BC_PINNED ? " (edges tied to rest sites)" : bc == BC_CLAMPED ? " (edges held fixed)" : "");
         break;
     }
+    case SDLK_c:
+        p->rod_card = !p->rod_card;
+        if (structural_change(a)) break;
+        toast(a, "cardinal bonds: %s", p->rod_card ? "rigid rods" : "springs");
+        break;
+    case SDLK_x:
+        p->rod_diag = !p->rod_diag;
+        if (structural_change(a)) break;
+        toast(a, "diagonal bonds: %s%s", p->rod_diag ? "rigid rods" : "springs",
+              p->diagonal ? "" : " (diagonals are off: D)");
+        break;
     case SDLK_d:
         p->diagonal = !p->diagonal;
-        structural_change(a);
+        if (structural_change(a)) break;
         toast(a, "diagonal springs %s", p->diagonal ? "on" : "off");
         break;
     case SDLK_t: {
@@ -106,7 +122,7 @@ static void handle_key(App *a, SDL_Keycode key, Uint16 mod)
         int k = 0;
         while (k < 4 && steps[k] <= p->prestrain + 1e-9) k++;
         p->prestrain = steps[k % 4];
-        structural_change(a);
+        if (structural_change(a)) break;
         if (p->prestrain > 0 && s->prestrain_eff == 0)
             toast(a, "prestrain %.0f%% set; acts only under clamped/periodic (B)", 100 * p->prestrain);
         else
@@ -116,7 +132,7 @@ static void handle_key(App *a, SDL_Keycode key, Uint16 mod)
     case SDLK_m:
         p->disorder = (Disorder)((p->disorder + 1) % DIS_COUNT);
         sim_set_masses(s);
-        structural_change(a);
+        if (structural_change(a)) break;
         toast(a, "masses: %s", p->disorder == DIS_LIGHT ? "light defect at centre"
                              : p->disorder == DIS_HEAVY ? "heavy defect at centre"
                              : p->disorder == DIS_RANDOM ? "random" : "uniform");
@@ -147,16 +163,17 @@ static void handle_key(App *a, SDL_Keycode key, Uint16 mod)
     case SDLK_f:
         if (shift) {                        /* lowest mode, current settings */
             int b = ui->pol == POL_T ? 1 : 0;
-            sim_excite_mode(s, b, p->fput_strain);
+            int rc = sim_excite_mode(s, b, p->fput_strain);
             spectrum_clear_history(&a->sp, s);
             ui->view = VIEW_MODES;
             mark_event(a);
-            toast(a, "lowest %s mode, strain %.2f", b ? "T" : "L", p->fput_strain);
+            if (rc) toast(a, "%s branch is frozen or blocked by the rods", b ? "T" : "L");
+            else    toast(a, "lowest %s mode, strain %.2f", b ? "T" : "L", p->fput_strain);
         } else {                            /* FPUT preset */
             if (!can_periodic(s)) { toast(a, "FPUT preset needs even cols and rows"); break; }
             p->bc = BC_PERIODIC; p->diagonal = 1; p->prestrain = 0.0;
             if (p->damping > 0) a->saved_damping = p->damping;
-            p->damping = 0.0; p->absorb = 0;
+            p->damping = 0.0; p->absorb = 0; p->rod_card = p->rod_diag = 0;
             if (p->disorder != DIS_NONE) { p->disorder = DIS_NONE; sim_set_masses(s); }
             sim_rebuild(s);
             sim_excite_mode(s, 0, p->fput_strain);
@@ -200,8 +217,8 @@ static void drag_target(App *a, int wx, int wy, double t)
     double lx, ly;
     render_to_lattice(&a->R, wx, wy, &lx, &ly);
     mlog_push(&a->mlog, t, lx, ly);
-    s->held_ux = lx - s->held % s->cols;
-    s->held_uy = ly - s->held / s->cols;
+    a->tgt_ux = lx - s->held % s->cols;
+    a->tgt_uy = ly - s->held / s->cols;
 }
 
 static void handle_mouse(App *a, const SDL_Event *ev)
@@ -216,7 +233,10 @@ static void handle_mouse(App *a, const SDL_Event *ev)
             render_to_lattice(&a->R, ev->button.x, ev->button.y, &lx, &ly);
             int i = sim_nearest(s, lx, ly, 0.9);
             if (i >= 0) {
+                /* grab the node where it is; the main loop moves it to the
+                 * pointer smoothly, so nothing is teleported in one step */
                 s->held = i;
+                s->held_ux = s->ux[i]; s->held_uy = s->uy[i];
                 s->held_vx = s->held_vy = 0.0;
                 mlog_clear(&a->mlog);
                 drag_target(a, ev->button.x, ev->button.y, t);
@@ -238,6 +258,7 @@ static void handle_mouse(App *a, const SDL_Event *ev)
             int i = s->held;
             s->held = -1;
             s->vx[i] = vx; s->vy[i] = vy;
+            sim_project_velocities(s);
             mark_event(a);
         }
         break;
@@ -380,12 +401,19 @@ int main(int argc, char **argv)
          * cannot keep up, the run slows down instead of spiralling */
         int max_steps = (int)ceil(a->ui.speed * 0.1 / s->p.dt) + 1, n = 0;
 
-        if (s->held >= 0) {
-            double vx, vy;
-            mlog_velocity(&a->mlog, t, 0.08, &vx, &vy);
-            s->held_vx = vx; s->held_vy = vy;
-        }
+        /* a dragged node moves from where it is to the pointer target
+         * linearly over this frame's substeps, at the matching velocity */
+        int nplan = (int)floor(acc / s->p.dt);
+        if (nplan > max_steps) nplan = max_steps;
+        double fx = s->held_ux, fy = s->held_uy;
         while (acc >= s->p.dt && n < max_steps) {
+            if (s->held >= 0 && nplan > 0) {
+                double f = (double)(n + 1) / nplan;
+                s->held_ux = fx + (a->tgt_ux - fx) * f;
+                s->held_uy = fy + (a->tgt_uy - fy) * f;
+                s->held_vx = (a->tgt_ux - fx) / (nplan * s->p.dt);
+                s->held_vy = (a->tgt_uy - fy) / (nplan * s->p.dt);
+            }
             sim_step(s);
             spectrum_after_step(&a->sp, s);
             acc -= s->p.dt;
@@ -398,6 +426,7 @@ int main(int argc, char **argv)
         sim_energy(s, &ke, &pe);
         a->ui.E = ke + pe;
         a->ui.drift_ok = s->p.damping == 0 && !s->p.absorb && s->held < 0;
+        if (s->rod_blocked) a->ui.blocked_until = t + 1.0;
         if (t - lag_wall0 >= 1.0) {
             double got = s->t - lag_sim0;
             a->ui.lagging = lag_want > 0 && got >= 0 && got < 0.9 * lag_want;

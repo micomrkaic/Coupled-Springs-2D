@@ -17,7 +17,7 @@ void params_default(Params *p)
 {
     *p = (Params){
         .cols = 64, .rows = 64,
-        .mass = 1.0, .k = 400.0, .kdiag = -1.0, .diagonal = 1,
+        .mass = 1.0, .k = 400.0, .kdiag = -1.0, .diagonal = 1, .rod_card = 0, .rod_diag = 0,
         .damping = 0.4, .dt = 5e-4, .speed = 1.0,
         .bc = BC_FREE, .prestrain = 0.0,
         .disorder = DIS_NONE, .defect_light = 0.2, .defect_heavy = 5.0,
@@ -42,6 +42,8 @@ static void usage(const char *argv0)
 "  -k, --k K               cardinal spring constant        (400)\n"
 "      --kdiag K           diagonal spring constant        (= k)\n"
 "      --no-diag           start with diagonal springs off\n"
+"      --rod-cardinal      cardinal bonds are rigid rods (RATTLE constraints)\n"
+"      --rod-diagonal      diagonal bonds are rigid rods\n"
 "  -b, --bc NAME           free | pinned | clamped | periodic   (free)\n"
 "      --prestrain E       L0 = (1-E)*a; acts under clamped/periodic (0)\n"
 "\n"
@@ -87,7 +89,7 @@ static int parse_dbl(const char *s, double *out)
 
 enum {
     O_KDIAG = 256, O_NODIAG, O_PRESTRAIN, O_DT, O_DISORDER, O_DLIGHT, O_DHEAVY,
-    O_DWIDTH, O_ABSORB, O_AWIDTH, O_AGAMMA, O_FPUT, O_NT, O_SEED, O_WIDTH, O_HEIGHT
+    O_DWIDTH, O_ROD_C, O_ROD_D, O_ABSORB, O_AWIDTH, O_AGAMMA, O_FPUT, O_NT, O_SEED, O_WIDTH, O_HEIGHT
 };
 
 int params_parse(Params *p, int argc, char **argv)
@@ -99,6 +101,8 @@ int params_parse(Params *p, int argc, char **argv)
         { "k",              required_argument, 0, 'k' },
         { "kdiag",          required_argument, 0, O_KDIAG },
         { "no-diag",        no_argument,       0, O_NODIAG },
+        { "rod-cardinal",   no_argument,       0, O_ROD_C },
+        { "rod-diagonal",   no_argument,       0, O_ROD_D },
         { "bc",             required_argument, 0, 'b' },
         { "prestrain",      required_argument, 0, O_PRESTRAIN },
         { "damping",        required_argument, 0, 'g' },
@@ -129,6 +133,8 @@ int params_parse(Params *p, int argc, char **argv)
         case 'k':  bad |= parse_dbl(optarg, &p->k); break;
         case O_KDIAG:     bad |= parse_dbl(optarg, &p->kdiag); break;
         case O_NODIAG:    p->diagonal = 0; break;
+        case O_ROD_C:     p->rod_card = 1; break;
+        case O_ROD_D:     p->rod_diag = 1; break;
         case 'b': {
             int found = 0;
             for (int i = 0; i < BC_COUNT; i++)

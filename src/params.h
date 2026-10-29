@@ -19,6 +19,8 @@ typedef struct {
     double   k;               /* cardinal spring constant                   */
     double   kdiag;           /* diagonal spring constant                   */
     int      diagonal;        /* diagonal springs on/off                    */
+    int      rod_card;        /* cardinal bonds are rigid rods              */
+    int      rod_diag;        /* diagonal bonds are rigid rods              */
     double   damping;         /* uniform linear drag gamma (kg/s)           */
     double   dt;              /* integration step (s)                       */
     double   speed;           /* simulated seconds per wall-clock second    */

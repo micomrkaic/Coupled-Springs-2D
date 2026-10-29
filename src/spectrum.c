@@ -230,8 +230,8 @@ static void sample_modes(Spectrum *sp, const Sim *s)
             }
             double QL = e[0][0] * qx + e[0][1] * qy, PL = e[0][0] * px + e[0][1] * py;
             double QT = e[1][0] * qx + e[1][1] * qy, PT = e[1][0] * px + e[1][1] * py;
-            EL += 0.5 * m * (PL * PL + wv[0] * wv[0] * QL * QL);
-            ET += 0.5 * m * (PT * PT + wv[1] * wv[1] * QT * QT);
+            if (isfinite(wv[0])) EL += 0.5 * m * (PL * PL + wv[0] * wv[0] * QL * QL);
+            if (isfinite(wv[1])) ET += 0.5 * m * (PT * PT + wv[1] * wv[1] * QT * QT);
         }
         out[k] = EL; out[SPEC_KMODES + k] = ET;
     }

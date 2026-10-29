@@ -24,6 +24,7 @@ typedef struct {
     double      fps;
     char        toast[96];
     double      toast_until, now;
+    double      blocked_until;  /* rods refused a motion recently */
 } UiState;
 
 typedef struct {

@@ -196,6 +196,14 @@ static void render_lattice(Renderer *R, const Sim *s)
         const Spring *sp = &s->spr[k];
         if (sp->wrap) continue;
         int a = sp->a, b = sp->b;
+        if (sp->rod) {
+            /* rods: thicker, coloured by constraint force as an equivalent
+             * spring strain f / (k L0); white-ish when unloaded */
+            SDL_Color c = strain_colour(sp->f / (sp->k * sp->L0));
+            c.a = 255;
+            geo_line(R, PX(a), PY(a), PX(b), PY(b), 2.2f * lw, c);
+            continue;
+        }
         double dx = sp->rx + s->ux[b] - s->ux[a], dy = sp->ry + s->uy[b] - s->uy[a];
         double strain = (sqrt(dx * dx + dy * dy) - sp->L0) / sp->L0;
         geo_line(R, PX(a), PY(a), PX(b), PY(b), lw, strain_colour(strain));
@@ -333,6 +341,7 @@ static void render_spectrum(Renderer *R, const Sim *s, Spectrum *sp, const UiSta
             int n = 0;
             for (int ix = 0; ix < sp->nlq && n < 1100; ix++) {
                 double wv = b == 0 ? sp->wL[ix] : sp->wT[ix];
+                if (!isfinite(wv)) wv = 1e30;          /* frozen by rods: off the top */
                 pts[n].x = (float)(pr.x + (ix + 0.5) * pr.w / sp->nlq);
                 pts[n].y = (float)(pr.y + pr.h * (h - 0.5 - wv / bin) / h);
                 n++;
@@ -411,7 +420,8 @@ static void render_text(Renderer *R, const Sim *s, const UiState *ui)
             { "L-drag", "pull, release to throw" }, { "R-click", "random kick" },
             { "Space",  "pluck centre" },           { "G",      "big random kick" },
             { "R",      "reset" },                  { "B",      "boundary cycle" },
-            { "D",      "diagonal springs" },       { "T",      "tension (prestrain)" },
+            { "D",      "diagonal bonds" },         { "T",      "tension (prestrain)" },
+            { "C",      "cardinal rods (rigid)" },  { "X",      "diagonal rods (rigid)" },
             { "M",      "mass disorder cycle" },    { "A",      "absorbing layer" },
             { "+/-  0", "damping / on-off" },       { "F",      "FPUT preset" },
             { "Sh-F",   "excite lowest mode" },     { "Tab",    "spectrum view" },
@@ -434,6 +444,12 @@ static void render_text(Renderer *R, const Sim *s, const UiState *ui)
     LINE(desc, "grid %dx%d  k=%.0f  m=%.2f", s->cols, s->rows, s->p.k, s->p.mass);
     LINE(desc, "boundary  %s", bc_name(s->p.bc));
     LINE(s->p.diagonal ? on : off, "diagonal  %s", s->p.diagonal ? "on" : "off");
+    if (s->nrods)
+        LINE(on, "rods      %s%s%s  %d sweeps", s->p.rod_card ? "card" : "",
+             s->p.rod_card && s->p.rod_diag && s->p.diagonal ? "+" : "",
+             s->p.rod_diag && s->p.diagonal ? "diag" : "", s->rod_iters);
+    else
+        LINE(desc, "rods      none");
     if (s->p.prestrain > 0 && s->prestrain_eff == 0)
         LINE(warn, "tension   %.0f%% (needs clamped/periodic)", 100 * s->p.prestrain);
     else
@@ -451,6 +467,7 @@ static void render_text(Renderer *R, const Sim *s, const UiState *ui)
     double wdt = s->omega_max * s->p.dt;
     if (wdt > 0.5) LINE(warn, "w_max*dt = %.2f: reduce --dt", wdt);
     if (ui->lagging) LINE(warn, "CPU-bound: running < %gx", ui->speed);
+    if (ui->now < ui->blocked_until) LINE(warn, "motion blocked by rods");
 #undef LINE
 }
 
