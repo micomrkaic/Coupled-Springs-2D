@@ -83,12 +83,12 @@ static void handle_key(App *a, SDL_Keycode key, Uint16 mod)
         sim_reset(s); spectrum_clear_history(&a->sp, s); mark_event(a);
         break;
     case SDLK_SPACE:
-        if (sim_displace(s, sim_idx(s, s->cols / 2, s->rows / 2), 0.0, -2.0))
-            toast(a, "pluck blocked: the rods cannot accommodate it");
+        if (sim_displace(s, sim_idx(s, s->cols / 2, s->rows / 2), 0.0, -2.0 * p->kick_scale))
+            toast(a, "pluck refused: the constraints cannot accommodate it");
         mark_event(a);
         break;
     case SDLK_g:
-        sim_kick_random(s, 0.5 * w0, 0.5 * w0);
+        sim_kick_random(s, 0.5 * w0 * p->kick_scale, 0.5 * w0 * p->kick_scale);
         mark_event(a);
         break;
 
@@ -112,6 +112,36 @@ static void handle_key(App *a, SDL_Keycode key, Uint16 mod)
         toast(a, "diagonal bonds: %s%s", p->rod_diag ? "rigid rods" : "springs",
               p->diagonal ? "" : " (diagonals are off: D)");
         break;
+    case SDLK_e:
+        p->bounded = !p->bounded;
+        if (structural_change(a)) break;
+        if (p->bounded) toast(a, "bounded bonds: |r - L0| < %.2f a", p->bound_delta);
+        else            toast(a, "hookean bonds");
+        break;
+    case SDLK_o:
+        p->orient = !p->orient;
+        if (structural_change(a)) break;
+        toast(a, "no-fold barrier %s", p->orient ? "on: cells cannot invert" : "off");
+        break;
+    case SDLK_k:
+        p->thermo = !p->thermo;
+        sim_update_damping(s); mark_event(a);
+        if (p->thermo) toast(a, "thermostat on: T = %.3g J", p->temp);
+        else           toast(a, "thermostat off");
+        break;
+    case SDLK_LEFTBRACKET: case SDLK_RIGHTBRACKET:
+        p->temp *= key == SDLK_RIGHTBRACKET ? 1.5 : 1.0 / 1.5;
+        if (p->temp < 1e-4) p->temp = 1e-4;
+        sim_update_damping(s); mark_event(a);
+        toast(a, "T = %.3g J%s", p->temp, p->thermo ? "" : " (thermostat off: K)");
+        break;
+    case SDLK_s: {
+        static const double sc[] = { 1.0, 0.3, 0.1 };
+        int k = 0; while (k < 3 && fabs(sc[k] - p->kick_scale) > 1e-9) k++;
+        p->kick_scale = sc[(k + 1) % 3];
+        toast(a, "kick / pluck strength x%g", p->kick_scale);
+        break;
+    }
     case SDLK_d:
         p->diagonal = !p->diagonal;
         if (structural_change(a)) break;
@@ -174,6 +204,7 @@ static void handle_key(App *a, SDL_Keycode key, Uint16 mod)
             p->bc = BC_PERIODIC; p->diagonal = 1; p->prestrain = 0.0;
             if (p->damping > 0) a->saved_damping = p->damping;
             p->damping = 0.0; p->absorb = 0; p->rod_card = p->rod_diag = 0;
+            p->bounded = p->orient = p->thermo = 0;
             if (p->disorder != DIS_NONE) { p->disorder = DIS_NONE; sim_set_masses(s); }
             sim_rebuild(s);
             sim_excite_mode(s, 0, p->fput_strain);
@@ -243,7 +274,7 @@ static void handle_mouse(App *a, const SDL_Event *ev)
             }
         } else if (ev->button.button == SDL_BUTTON_RIGHT) {
             double w0 = sim_omega0(s);
-            sim_kick_random(s, 0.25 * w0, 0.75 * w0);
+            sim_kick_random(s, 0.25 * w0 * s->p.kick_scale, 0.75 * w0 * s->p.kick_scale);
             mark_event(a);
         }
         break;
@@ -338,6 +369,7 @@ int main(int argc, char **argv)
         fprintf(stderr, "warning: omega_max*dt = %.2f; the integrator is inaccurate above ~0.5 "
                         "and unstable at 2. Reduce --dt.\n", a->sim.omega_max * p.dt);
     render_layout(&a->R, &a->sim);
+    a->sim.drag_soft = 1;                      /* GUI drags pull through a mouse spring */
     a->ui = (UiState){ .view = VIEW_OCC, .pol = POL_BOTH, .speed = p.speed, .show_help = 1 };
     a->saved_damping = p.damping > 0 ? p.damping : 0.4;
     a->running = 1;
@@ -425,7 +457,8 @@ int main(int argc, char **argv)
         double ke, pe;
         sim_energy(s, &ke, &pe);
         a->ui.E = ke + pe;
-        a->ui.drift_ok = s->p.damping == 0 && !s->p.absorb && s->held < 0;
+        a->ui.drift_ok = s->p.damping == 0 && !s->p.absorb && !s->p.thermo && s->held < 0;
+        s->lind_ema = 0.95 * s->lind_ema + 0.05 * sim_lindemann(s);
         if (s->rod_blocked) a->ui.blocked_until = t + 1.0;
         if (t - lag_wall0 >= 1.0) {
             double got = s->t - lag_sim0;

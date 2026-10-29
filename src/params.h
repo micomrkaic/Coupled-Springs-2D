@@ -34,6 +34,17 @@ typedef struct {
     int      absorb_width;    /* layer thickness in nodes                   */
     double   absorb_gamma;    /* peak extra drag in the layer (kg/s)        */
     double   fput_strain;     /* peak strain of the F-key mode excitation   */
+
+    /* crystal model */
+    int      bounded;           /* bounded bonds: |r - L0| < bound_delta       */
+    double   bound_delta;      /* maximum bond excursion (lattice units)     */
+    int      orient;          /* cell-orientation (no fold-over) barrier    */
+    double   orient_floor;    /* barrier acts below this fraction of A_ref  */
+    double   orient_kappa;    /* barrier strength (J)                       */
+    int      thermo;          /* Langevin thermostat on/off                 */
+    double   temp;            /* k_B T (J)                                  */
+    double   therm_gamma;     /* thermostat friction added to every node    */
+    double   kick_scale;      /* scale for pluck / kick amplitudes          */
     int      nt;              /* time samples for the omega-q spectrum      */
     unsigned seed;
     int      win_w, win_h;    /* initial window size in points (0 = auto)   */

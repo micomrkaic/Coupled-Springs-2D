@@ -134,6 +134,58 @@ Default 10.
 Peak extra drag in the layer; the profile is quadratic in depth.
 Default
 .RI \(sr( km ).
+.SS "Crystal model"
+.TP
+.B \-\-bounded
+Bounded bonds: the energy of a bond whose length differs from its rest
+length by
+.I e
+is
+.IR k\ e\(S2/2/(1\ \-\ (e/D)\(S2) ,
+Hookean for small
+.I e
+and infinite at
+.IR |e|\ =\ D .
+.TP
+.BI \-\-bound\-delta " D"
+Maximum bond excursion
+.IR D ,
+0\ <\ D\ <\ 1.
+Default 0.3.
+.TP
+.B \-\-orient
+Orientation (no-fold) barrier: every corner triangle of every unit cell
+keeps a positive area, so cells cannot invert and neighbours cannot change
+their left/right or up/down order.
+.TP
+.BI \-\-orient\-floor " F"
+The barrier acts on triangles whose area falls below
+.I F
+times the rest area.
+Default 0.5.
+.TP
+.BI \-\-orient\-kappa " K"
+Barrier strength in J.
+Default: equal to
+.IR k .
+.TP
+.B \-\-thermostat
+Langevin thermostat on.
+.TP
+.BI \-\-temp " T"
+Bath temperature
+.IR k_BT ,
+in J.
+Default 0.5.
+.TP
+.BI \-\-therm\-gamma " G"
+Thermostat friction added to every node, kg/s.
+Default
+.RI 0.1\(sr( km ).
+.TP
+.BI \-\-kick\-scale " S"
+Scale for the amplitudes of plucks and random kicks.
+Default 1.
 .SS Analysis
 .TP
 .BI \-\-fput\-strain " S"
@@ -165,8 +217,9 @@ Print a usage summary and exit.
 .TP 12
 .B Left\-drag
 Grab a mass and pull it; release to throw.
-The mass follows the pointer smoothly; the release velocity is a
-least-squares fit over the last 80\ ms of pointer motion.
+The mass is pulled by a stiff, critically damped spring, with the pull
+capped at one lattice spacing, so walls and rods always win; the release
+velocity is a least-squares fit over the last 80\ ms of pointer motion.
 .TP
 .B Right\-click
 Random velocity kick, with net momentum removed (free and periodic) and net
@@ -192,6 +245,22 @@ Cardinal bonds: springs \(<> rigid rods.
 .TP
 .B X
 Diagonal bonds: springs \(<> rigid rods.
+.TP
+.B E
+Bounded bonds on/off.
+.TP
+.B O
+Orientation (no-fold) barrier on/off.
+Cells pressed against it are shaded orange.
+.TP
+.B K
+Thermostat on/off.
+.TP
+.BR [ " / " ]
+Divide / multiply the temperature by 1.5.
+.TP
+.B S
+Kick and pluck strength: \(mu1, \(mu0.3, \(mu0.1.
 .TP
 .B T
 Cycle prestrain: 0, 2, 5, 10%.
@@ -284,6 +353,21 @@ compression.
 Under clamped or periodic boundaries cardinal rods lock the lattice
 completely; moves they forbid are refused and the state panel says so.
 .PP
+Crystal model.
+Bounded bonds and the orientation barrier together guarantee that no two
+masses overlap and that no neighbour ever passes to the other side.
+The thermostat replaces the drag half-steps with exact Ornstein\-Uhlenbeck
+steps.
+The state panel shows the Lindemann ratio, the r.m.s. relative
+displacement of nearest neighbours in units of
+.IR a ;
+crystals melt near 0.1.
+Before each step the integrator estimates the stiffest wall frequency and
+splits the step into up to 1024 substeps so that
+\(*w_loc\(*Dt\ \(<=\ 0.1;
+a substep that would close more than half of a bond's remaining gap, or more
+than half of a small triangle's area, is redone finer.
+.PP
 The README describes the dispersion relation, the boundary conditions and
 the FPUT preset in full.
 .SH ENVIRONMENT
@@ -328,6 +412,12 @@ trapped in the defect's local mode.
 .TP
 .B spring_grid \-\-kdiag 200
 The isotropic case: circular wavefronts, c_L/c_T\ =\ \(sr3.
+.TP
+.B spring_grid \-\-bounded \-\-orient \-\-thermostat \-\-temp 0.5 \-\-bc pinned \-g 0
+A thermal crystal: masses vibrate about their sites but never overlap or
+swap; raise the temperature with
+.B ]
+and watch the Lindemann ratio approach 0.1.
 .TP
 .B spring_grid \-\-rod\-cardinal \-\-dt 2e\-3
 Rigid rows and columns coupled by diagonal springs, at about real time.

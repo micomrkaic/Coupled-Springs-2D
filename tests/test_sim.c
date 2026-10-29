@@ -34,9 +34,10 @@ static void test_dynmat(void)
 {
     printf("dynamical matrix vs. linearised forces\n");
     const int N = 16;
-    for (int variant = 0; variant < 3; variant++) {
+    for (int variant = 0; variant < 4; variant++) {
         Params p = base(N, BC_PERIODIC, variant > 0);
-        p.prestrain = variant == 2 ? 0.07 : 0.0;
+        p.prestrain = variant >= 2 ? 0.07 : 0.0;
+        p.bounded = variant == 3;                /* bounded: k_eff = V'', T = V' */
         Sim s; sim_init(&s, &p);
         Lattice L; sim_lattice(&s, &L);
         double worst = 0;
@@ -62,8 +63,8 @@ static void test_dynmat(void)
                     if (err / scale > worst) worst = err / scale;
                 }
             }
-        CHECK(worst < 1e-4, "variant %d (diag=%d, prestrain=%.2f): max rel err %.2e",
-              variant, p.diagonal, p.prestrain, worst);
+        CHECK(worst < 1e-4, "variant %d (diag=%d, prestrain=%.2f, bounded=%d): max rel err %.2e",
+              variant, p.diagonal, p.prestrain, p.bounded, worst);
         sim_free(&s);
     }
 }
@@ -350,6 +351,118 @@ static void test_absorb(void)
     CHECK(off > 0.99 && on < 0.01, "no layer %.3f, with layer %.4f", off, on);
 }
 
+/* 7a. crystal model: walls hold, cells never invert, thermostat is correct */
+#ifndef KICKAMP
+#define KICKAMP 25.0
+#endif
+static int any_inverted(Sim *s)
+{
+    int keep = s->p.orient, kf = s->p.bounded;
+    s->p.orient = 1; s->p.bounded = 0;
+    int ok = sim_valid(s);
+    s->p.orient = keep; s->p.bounded = kf;
+    return !ok;
+}
+
+static void test_crystal(void)
+{
+    printf("crystal model (bounded bonds, orientation barrier, thermostat)\n");
+
+    /* energy conservation with bounded bonds at moderate amplitude */
+    {
+        Params p = base(32, BC_FREE, 1);
+        p.bounded = 1;
+        Sim s; sim_init(&s, &p);
+        sim_kick_random(&s, 4.0, 4.0);
+        double ke, pe; sim_energy(&s, &ke, &pe);
+        double E0 = ke + pe, worst = 0;
+        for (int i = 0; i < 40000; i++) {
+            sim_step(&s);
+            if (i % 100 == 0) { sim_energy(&s, &ke, &pe); double d = fabs(ke + pe - E0) / E0; if (d > worst) worst = d; }
+        }
+        CHECK(worst < 3e-4, "bounded, gamma = 0: max |dE|/E = %.1e over 20 s", worst);
+        sim_free(&s);
+    }
+
+    /* violent kicks: without the barriers cells fold over; with them nothing
+     * crosses a wall or inverts, and energy is still conserved */
+    for (int guard = 0; guard < 2; guard++) {
+        Params p = base(24, BC_PINNED, 1);
+        p.bounded = guard; p.orient = guard;
+        Sim s; sim_init(&s, &p);
+        sim_kick_random(&s, KICKAMP, KICKAMP);
+        double ke, pe; sim_energy(&s, &ke, &pe);
+        double E0 = ke + pe, worst = 0;
+        int inverted = 0, invalid = 0, maxdepth = 0, blocked = 0;
+        for (int i = 0; i < 4000; i++) {
+            sim_step(&s);
+            if (s.sub_depth > maxdepth) maxdepth = s.sub_depth;
+            blocked += s.rod_blocked;
+            if (i % 10 == 0) {
+                inverted += any_inverted(&s);
+                if (guard && !sim_valid(&s)) invalid++;
+                sim_energy(&s, &ke, &pe);
+                double d = fabs(ke + pe - E0) / E0; if (d > worst) worst = d;
+            }
+        }
+        if (!guard)
+            CHECK(inverted > 0, "control (Hooke, no barrier, kick %.0f a/s): %d of 400 samples have folded cells",
+                  KICKAMP, inverted);
+        else
+            CHECK(inverted == 0 && invalid == 0 && blocked == 0 && worst < 1e-2,
+                  "bounded + barrier: 0 folds, 0 wall crossings; max substeps %d; reversals %ld; |dE|/E %.1e",
+                  1 << maxdepth, s.reversals, worst);
+        sim_free(&s);
+    }
+
+    /* pluck is capped inside the bond bound */
+    {
+        Params p = base(16, BC_FREE, 1);
+        p.bounded = 1;
+        Sim s; sim_init(&s, &p);
+        int r = sim_displace(&s, sim_idx(&s, 8, 8), 0.0, -2.0);
+        double d = fabs(s.uy[sim_idx(&s, 8, 8)]);
+        CHECK(r == 0 && fabs(d - 0.8 * p.bound_delta) < 1e-12, "pluck of 2a capped to %.3f (0.8 delta)", d);
+        sim_free(&s);
+    }
+
+    /* barrier alone refuses a pluck that would fold a cell */
+    {
+        Params p = base(16, BC_FREE, 1);
+        p.orient = 1;
+        Sim s; sim_init(&s, &p);
+        int r = sim_displace(&s, sim_idx(&s, 8, 8), 0.0, -2.0);
+        double u = 0; for (int i = 0; i < s.n; i++) u += fabs(s.uy[i]);
+        CHECK(r == -1 && u == 0.0, "barrier: a 2a pluck (which folds cells) is refused");
+        sim_free(&s);
+    }
+
+    /* thermostat: equipartition <KE> = kT per node (2 d.o.f.), and the
+     * Lindemann ratio scales as sqrt(T) */
+    double lind[2];
+    for (int t = 0; t < 2; t++) {
+        Params p = base(16, BC_PERIODIC, 1);
+        p.thermo = 1; p.temp = t ? 2.0 : 0.5; p.therm_gamma = 4.0;
+        Sim s; sim_init(&s, &p);
+        double ksum = 0, l2 = 0, v2 = 0, v4 = 0; int ns = 0, nv = 0;
+        for (int i = 0; i < 80000; i++) {
+            sim_step(&s);
+            if (i > 20000 && i % 20 == 0) {
+                double ke, pe; sim_energy(&s, &ke, &pe);
+                ksum += ke / s.n; double l = sim_lindemann(&s); l2 += l * l; ns++;
+                for (int j = 0; j < s.n; j++) { double v = s.vx[j] * s.vx[j]; v2 += v; v4 += v * v; nv++; }
+            }
+        }
+        double kT = ksum / ns, kurt = (v4 / nv) / ((v2 / nv) * (v2 / nv));
+        lind[t] = sqrt(l2 / ns);
+        CHECK(fabs(kT / p.temp - 1) < 0.05 && fabs(kurt - 3.0) < 0.1,
+              "T = %.1f: <KE>/node = %.3f (expect %.3f), velocity kurtosis %.3f (Gaussian 3), Lindemann %.4f",
+              p.temp, kT, p.temp, kurt, lind[t]);
+        sim_free(&s);
+    }
+    CHECK(fabs(lind[1] / lind[0] - 2.0) < 0.1, "Lindemann ratio T=2 / T=0.5 = %.3f (expect 2 = sqrt 4)", lind[1] / lind[0]);
+}
+
 /* 7b. random kicks carry no net momentum or angular momentum (free) */
 static void test_kick(void)
 {
@@ -400,6 +513,7 @@ int main(int argc, char **argv)
     test_fput();
     test_defect();
     test_absorb();
+    test_crystal();
     test_kick();
     test_throw();
     printf(failures ? "\n%d FAILED\n" : "\nall passed\n", failures);

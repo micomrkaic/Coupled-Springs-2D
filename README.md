@@ -28,6 +28,13 @@ dispersion, the energy in each mode over time, and the total energy.
 - **Rigid rods.** Cardinal and/or diagonal bonds can be inextensible rods,
   enforced as constraints with RATTLE. They store no energy, show their load in
   colour, and do not limit Δt.
+- **Crystal model.** Three independent switches:
+  - *bounded bonds*: a bond's length change stays below Δ;
+  - an *orientation barrier*: no cell can fold over, so neighbours never swap left
+    and right;
+  - a *Langevin thermostat*, with a live Lindemann ratio.
+
+  Adaptive substeps resolve the walls.
 - **Prestress (tension).** Gives the cardinal-only lattice a nonzero transverse stiffness.
 - **Disorder.** A light mass defect (which has a localised mode above the band), a heavy
   defect, or random masses.
@@ -86,6 +93,8 @@ pages in `~/.local/share/man` automatically once `~/.local/bin` is on your
 ./spring_grid --disorder light --absorb         # localised mode survives the absorber
 ./spring_grid -c 32 -r 32 --rod-cardinal        # rigid rows/columns, diagonal springs
 ./spring_grid --rod-cardinal --dt 2e-3          # 64x64 with rods at ~real time
+./spring_grid --bounded --orient --thermostat --temp 0.5 --bc pinned -g 0
+                                                # a thermal crystal: no overlaps, no swaps
 ./spring_grid --help
 ```
 
@@ -97,6 +106,10 @@ pages in `~/.local/share/man` automatically once `~/.local/bin` is on your
 | `--kdiag K` | = k | diagonal spring constant |
 | `--no-diag` | | start with the diagonal springs off |
 | `--rod-cardinal` / `--rod-diagonal` | off | make that bond family rigid rods |
+| `--bounded`, `--bound-delta D` | off, 0.3 | bounded bonds: \|r − L0\| < D |
+| `--orient`, `--orient-floor F`, `--orient-kappa K` | off, 0.5, = k | no-fold barrier: acts below F × rest cell area |
+| `--thermostat`, `--temp T`, `--therm-gamma G` | off, 0.5 J, 0.1√(km) | Langevin thermostat at k_BT = T |
+| `--kick-scale S` | 1 | scales pluck and kick amplitudes |
 | `-b, --bc NAME` | free | `free`, `pinned`, `clamped` or `periodic` |
 | `--prestrain E` | 0 | rest length L0 = (1−E)·\|r\|; takes effect only under clamped or periodic |
 | `-g, --damping G` | 0.4 | uniform drag, kg/s |
@@ -117,7 +130,7 @@ pages in `~/.local/share/man` automatically once `~/.local/bin` is on your
 
 | Input | Action |
 |---|---|
-| Left-drag | Grab a mass; release to throw it. The grabbed mass moves smoothly to the pointer over each frame's substeps, and the release velocity is a least-squares fit over the last 80 ms |
+| Left-drag | Grab a mass and pull it; release to throw it. The mass is pulled by a stiff, critically damped mouse spring, with the pull capped at one lattice spacing, so walls and rods always win and a heavy pull just lags. The release velocity is a least-squares fit over the last 80 ms |
 | Right-click | Random velocity kick (net momentum removed; net angular momentum too, under free edges) |
 | Space | Pluck the centre mass |
 | G | Large random kick |
@@ -126,6 +139,11 @@ pages in `~/.local/share/man` automatically once `~/.local/bin` is on your
 | D | Diagonal bonds on/off |
 | C | Cardinal bonds: springs ↔ rigid rods |
 | X | Diagonal bonds: springs ↔ rigid rods |
+| E | Bounded bonds on/off |
+| O | No-fold (orientation) barrier on/off |
+| K | Thermostat on/off |
+| [ / ] | Temperature ÷1.5 / ×1.5 |
+| S | Kick and pluck strength: ×1 → ×0.3 → ×0.1 |
 | T | Cycle prestrain: 0 / 2 / 5 / 10 % |
 | M | Cycle masses: uniform / light defect / heavy defect / random |
 | A | Absorbing layer on/off |
@@ -271,6 +289,62 @@ Rods change the physics in these ways:
   multiplier, as an equivalent spring strain f/(kL0): red for tension, blue
   for compression.
 - **Prestress** applies to springs only. Rods keep their reference length.
+
+**Crystal model.** A real crystal's atoms vibrate a little about their sites.
+They never overlap, and a neighbour never ends up on the other side.
+Hookean springs guarantee neither: a bond has finite energy at zero length,
+and a cell can fold over without changing any bond length. Three switches fix
+this.
+
+- **Bounded bonds (E).** The bond energy is V(e) = ½k·e²/(1 − (e/Δ)²), with
+  e = r − L0.
+  - For small e this is exactly Hooke's law, so the spectra and the analytic
+    dispersion are unchanged. The analytic stiffness uses V″ and V′ about any
+    prestress, and the test suite checks it to 10⁻¹⁰.
+  - The energy is infinite at |e| = Δ. So with Δ < L0 a bond can neither
+    collapse nor stretch without bound.
+  - The wall rises like 1/distance. The usual FENE wall, −ln(1 − (e/Δ)²), is
+    too soft: at a few hundred k·Δ² of energy its turning point lies closer to
+    the wall than double precision can resolve.
+- **No-fold barrier (O).** Each unit cell is split into its four corner
+  triangles, and every signed area A carries the energy
+  b(A) = κ(A_on − A)²/(A·A_on) for A < A_on (zero above).
+  - This is smooth (C¹) at A_on = floor × ½ and infinite at A = 0.
+  - So no cell can invert. Neighbours can never change their left/right or
+    up/down order, by compression or by rotation, and non-bonded masses cannot
+    overlap because the sheet cannot fold.
+  - Cells pressed against the barrier are shaded orange.
+- **Thermostat (K, [ ]).**
+  - The two drag half-steps become exact Ornstein–Uhlenbeck steps,
+    v ← c·v + √(kT/m·(1 − c²))·ξ (an OBABO splitting).
+  - ξ is unit-variance uniform noise. Each step's kick is tiny, so over a
+    relaxation time the sum is Gaussian: the test suite measures velocity
+    kurtosis 3.008 and ⟨KE⟩ per node = kT to 0.5%.
+  - The state panel shows the **Lindemann ratio**: the r.m.s. relative
+    displacement of nearest neighbours, in units of a. In 2-D the absolute
+    displacement grows without bound with system size (Mermin–Wagner), so
+    neighbour displacement is the meaningful measure.
+  - Crystals melt near 0.1, and the readout turns orange there. It scales as
+    √T, which is tested to 0.1%.
+- **Safeguard.** Before each step the integrator estimates the stiffest local
+  wall frequency ω_loc from the curvature of the walls. It splits the step
+  into 2ⁿ substeps (up to 1,024) so that ω_loc·Δt_sub ≤ 0.1.
+  - A substep is also rejected and redone finer if any bond closes more than
+    half its gap to the wall, or any small triangle loses more than half its
+    area.
+  - If even 1,024 substeps cannot resolve a free motion, the velocities are
+    reversed (an exact time reversal, energy unchanged) and the state panel
+    counts it. The tests never trigger this.
+- **Tested guarantees.** With every node kicked at 25 a/s (above the speed of
+  sound), plain springs fold cells in 397 of 400 samples. With bounded bonds
+  and the barrier: no folds, no wall crossings, and energy conserved to
+  1.2×10⁻³.
+- **Cost.** With all three switches on, 64×64 runs at about 1.2× real time.
+- **Recipe for a thermal crystal.**
+  ```sh
+  spring_grid --bounded --orient --thermostat --temp 0.5 --bc pinned -g 0
+  ```
+  Then raise T with `]` and watch the Lindemann ratio approach 0.1.
 
 **Prestress** sets L0 = (1−e)|r|. It applies only under clamped and periodic
 boundaries, because free edges would simply contract to the rest length.

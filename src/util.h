@@ -9,6 +9,8 @@
 /* splitmix64 */
 double rng_uniform(uint64_t *state);              /* [0, 1)  */
 double rng_sym(uint64_t *state);                  /* [-1, 1) */
+double rng_gauss(uint64_t *state);                /* N(0, 1), Box-Muller */
+void   rng_gauss2(uint64_t *state, double *a, double *b);   /* two independent N(0, 1) */
 
 /*
  * Decimating history: fixed capacity, sampled in simulation time.  When

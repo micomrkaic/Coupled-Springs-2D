@@ -206,6 +206,8 @@ static void render_lattice(Renderer *R, const Sim *s)
         }
         double dx = sp->rx + s->ux[b] - s->ux[a], dy = sp->ry + s->uy[b] - s->uy[a];
         double strain = (sqrt(dx * dx + dy * dy) - sp->L0) / sp->L0;
+        /* bounded bonds: full colour at the wall */
+        if (s->p.bounded) strain = (sqrt(dx * dx + dy * dy) - sp->L0) / s->p.bound_delta / 8.0;
         geo_line(R, PX(a), PY(a), PX(b), PY(b), lw, strain_colour(strain));
     }
     geo_flush(R);
@@ -222,6 +224,28 @@ static void render_lattice(Renderer *R, const Sim *s)
                 float h = (float)(sc * 0.22); if (h < 2 * R->dpi) h = 2 * R->dpi;
                 geo_rect(R, rx - h, ry - h, 2 * h, 2 * h, (SDL_Color){ 110, 110, 125, 255 });
             }
+        }
+        geo_flush(R);
+    }
+
+    /* cells pressed against the orientation barrier */
+    if (s->p.orient) {
+        const double Aon = 0.5 * s->p.orient_floor;
+        for (int c = 0; c < s->ncells; c++) {
+            const double *A = &s->tarea[4 * c];
+            double amin = A[0];
+            for (int k = 1; k < 4; k++) if (A[k] < amin) amin = A[k];
+            if (amin >= Aon) continue;
+            const int *cn = &s->cell[4 * c];
+            float px[4], py[4];
+            for (int k = 0; k < 4; k++) { px[k] = PX(cn[k]); py[k] = PY(cn[k]); }
+            if (fabsf(px[2] - px[0]) > 3 * (float)sc || fabsf(py[2] - py[0]) > 3 * (float)sc) continue;  /* wrap */
+            double f = 1.0 - amin / Aon; if (f < 0) f = 0; if (f > 1) f = 1;
+            SDL_Color col = { 255, 150, 40, (Uint8)(40 + 160 * f) };
+            if (geo_reserve(R, 4, 6)) break;
+            int v0 = geo_v(R, px[0], py[0], col), v1 = geo_v(R, px[1], py[1], col);
+            int v2 = geo_v(R, px[2], py[2], col), v3 = geo_v(R, px[3], py[3], col);
+            geo_t(R, v0, v1, v2); geo_t(R, v0, v2, v3);
         }
         geo_flush(R);
     }
@@ -418,16 +442,14 @@ static void render_text(Renderer *R, const Sim *s, const UiState *ui)
     if (ui->show_help) {
         static const char *help[][2] = {
             { "L-drag", "pull, release to throw" }, { "R-click", "random kick" },
-            { "Space",  "pluck centre" },           { "G",      "big random kick" },
+            { "Space G", "pluck centre / big kick" }, { "S",      "kick strength" },
             { "R",      "reset" },                  { "B",      "boundary cycle" },
-            { "D",      "diagonal bonds" },         { "T",      "tension (prestrain)" },
-            { "C",      "cardinal rods (rigid)" },  { "X",      "diagonal rods (rigid)" },
-            { "M",      "mass disorder cycle" },    { "A",      "absorbing layer" },
-            { "+/-  0", "damping / on-off" },       { "F",      "FPUT preset" },
-            { "Sh-F",   "excite lowest mode" },     { "Tab",    "spectrum view" },
-            { "V",      "branch L / T / L+T" },     { "P",      "pause" },
-            { ", .",    "slower / faster" },        { "H",      "hide this help" },
-            { "Q/Esc",  "quit" },
+            { "D T",    "diagonals / tension" },    { "C X",    "rods: cardinal/diag" },
+            { "E",      "bounded bonds" },          { "O",      "no-fold barrier" },
+            { "K [ ]",  "thermostat / T -/+" },     { "M A",    "masses / absorber" },
+            { "+/-  0", "damping / on-off" },       { "F Sh-F", "FPUT / lowest mode" },
+            { "Tab V",  "view / branch" },          { "P , .",  "pause / speed" },
+            { "H Q",    "help / quit" },
         };
         text(R, x, y, head, "CONTROLS"); y += lh + 2 * fs;
         for (size_t i = 0; i < sizeof help / sizeof *help && y + lh < bottom; i++) {
@@ -455,6 +477,19 @@ static void render_text(Renderer *R, const Sim *s, const UiState *ui)
     else
         LINE(desc, "tension   %.0f%%", 100 * s->prestrain_eff);
     LINE(desc, "damping   %.3g kg/s", s->p.damping);
+    if (s->p.bounded) LINE(on, "bonds     bounded d=%.2f", s->p.bound_delta);
+    else              LINE(desc, "bonds     hookean");
+    LINE(s->p.orient ? on : desc, "no-fold   %s", s->p.orient ? "on" : "off");
+    if (s->p.thermo) LINE(on, "thermo    T=%.3g J g=%.2g", s->p.temp, s->p.therm_gamma);
+    else             LINE(desc, "thermo    off (T=%.3g)", s->p.temp);
+    {
+        double L = s->lind_ema;
+        SDL_Color c = L < 0.05 ? on : L < 0.1 ? desc : warn;
+        LINE(c, "Lindemann %.3f%s", L, L >= 0.1 ? "  melting" : "");
+    }
+    LINE(desc, "kicks     x%g", s->p.kick_scale);
+    if (s->sub_depth > 0) LINE(desc, "substeps  %d (near a wall)", 1 << s->sub_depth);
+    if (s->reversals)     LINE(warn, "reversals %ld", s->reversals);
     LINE(s->p.absorb ? on : desc, "absorber  %s", s->p.absorb ? "on" : "off");
     LINE(desc, "masses    %s", disorder_name(s->p.disorder));
     LINE(desc, "speed     %gx%s", ui->speed, ui->paused ? "  PAUSED" : "");
@@ -467,7 +502,7 @@ static void render_text(Renderer *R, const Sim *s, const UiState *ui)
     double wdt = s->omega_max * s->p.dt;
     if (wdt > 0.5) LINE(warn, "w_max*dt = %.2f: reduce --dt", wdt);
     if (ui->lagging) LINE(warn, "CPU-bound: running < %gx", ui->speed);
-    if (ui->now < ui->blocked_until) LINE(warn, "motion blocked by rods");
+    if (ui->now < ui->blocked_until) LINE(warn, "motion blocked by constraints");
 #undef LINE
 }
 

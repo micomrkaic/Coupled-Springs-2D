@@ -1,5 +1,7 @@
 #include "util.h"
 
+#include <math.h>
+
 #include <stdlib.h>
 #include <string.h>
 
@@ -13,6 +15,21 @@ double rng_uniform(uint64_t *s)
 }
 
 double rng_sym(uint64_t *s) { return 2.0 * rng_uniform(s) - 1.0; }
+
+double rng_gauss(uint64_t *s)
+{
+    double u1 = rng_uniform(s), u2 = rng_uniform(s);
+    if (u1 < 1e-300) u1 = 1e-300;
+    return sqrt(-2.0 * log(u1)) * cos(6.283185307179586 * u2);
+}
+
+void rng_gauss2(uint64_t *s, double *a, double *b)
+{
+    double u1 = rng_uniform(s), u2 = rng_uniform(s);
+    if (u1 < 1e-300) u1 = 1e-300;
+    double r = sqrt(-2.0 * log(u1)), th = 6.283185307179586 * u2;
+    *a = r * cos(th); *b = r * sin(th);
+}
 
 int hist_init(Hist *h, int nser, int cap, double dt)
 {

@@ -19,12 +19,16 @@ int sim_init(Sim *s, const Params *p)
     size_t n = (size_t)s->n;
     double **arrs[] = { &s->ux, &s->uy, &s->vx, &s->vy, &s->ax, &s->ay,
                         &s->m, &s->inv_m, &s->gamma, &s->decay, &s->anchor_k,
-                        &s->oux, &s->ouy, &s->sx, &s->sy, &s->svx, &s->svy };
+                        &s->oux, &s->ouy, &s->sx, &s->sy, &s->svx, &s->svy,
+                        &s->sax, &s->say, &s->noise };
     for (size_t i = 0; i < sizeof arrs / sizeof *arrs; i++)
         if (!(*arrs[i] = calloc(n, sizeof(double)))) return -1;
     if (!(s->fixed = calloc(n, 1))) return -1;
     s->spr_cap = s->n * 4 + 8;
     if (!(s->spr = calloc((size_t)s->spr_cap, sizeof *s->spr))) return -1;
+    if (!(s->cell = calloc((size_t)s->n * 4, sizeof *s->cell))) return -1;
+    if (!(s->exc = calloc((size_t)s->spr_cap, sizeof *s->exc))) return -1;
+    if (!(s->tarea = calloc((size_t)s->n * 4, sizeof *s->tarea))) return -1;
 
     sim_set_masses(s);
     sim_rebuild(s);
@@ -36,6 +40,7 @@ void sim_free(Sim *s)
     free(s->ux); free(s->uy); free(s->vx); free(s->vy); free(s->ax); free(s->ay);
     free(s->m); free(s->inv_m); free(s->gamma); free(s->decay); free(s->anchor_k);
     free(s->oux); free(s->ouy); free(s->sx); free(s->sy); free(s->svx); free(s->svy);
+    free(s->sax); free(s->say); free(s->noise); free(s->cell); free(s->exc); free(s->tarea);
     free(s->fixed); free(s->spr); free(s->chain); free(s->chain_off); free(s->tri); free(s->vfac);
     memset(s, 0, sizeof *s);
 }
@@ -94,10 +99,128 @@ static void add_spring(Sim *s, int a, int b, double rx, double ry, double k, int
     if (rod) s->nrods++;
 }
 
+static inline int kinematic(const Sim *s, int i) { return i == s->held && !s->drag_soft; }
+
 static inline double wgt(const Sim *s, int i)
 {
-    return (s->fixed[i] || i == s->held) ? 0.0 : s->inv_m[i];
+    return (s->fixed[i] || kinematic(s, i)) ? 0.0 : s->inv_m[i];
 }
+
+/* ── bond law: Hooke, or bounded with a wall at |r - L0| = D ───────────── */
+
+/* energy and dV/dr of a (non-rod) bond at length r; INFINITY past the wall.
+ * Bounded: V = k e^2 / (2g), g = 1 - (e/D)^2, so dV/de = k e / g^2. */
+static inline void bond_law(const Sim *s, const Spring *sp, double r, double *V, double *dV)
+{
+    double e = r - sp->L0;
+    if (s->p.bounded) {
+        double D = s->p.bound_delta, x = e / D, g = 1.0 - x * x;
+        if (g <= 0.0) { *V = INFINITY; *dV = e > 0 ? INFINITY : -INFINITY; return; }
+        *V  = 0.5 * sp->k * e * e / g;
+        *dV = sp->k * e / (g * g);
+    } else {
+        *V  = 0.5 * sp->k * e * e;
+        *dV = sp->k * e;
+    }
+}
+
+/* ── orientation barrier on the corner triangles of every unit cell ─────── */
+/* b(A) = kappa (A_on - A)^2 / (A A_on) below A_on: C^1 there, 1/A at 0 */
+
+static const double CORNER[4][2] = { { 0, 0 }, { 1, 0 }, { 1, 1 }, { 0, 1 } };
+
+/* signed area of the triangle at corner k of cell c (positive at rest, 1/2) */
+static inline double tri_area(const Sim *s, const int *cn, int k, double g[3][2])
+{
+    int k1 = (k + 1) & 3, k3 = (k + 3) & 3;
+    int i0 = cn[k], i1 = cn[k1], i2 = cn[k3];
+    double ax = CORNER[k1][0] - CORNER[k][0] + s->ux[i1] - s->ux[i0];
+    double ay = CORNER[k1][1] - CORNER[k][1] + s->uy[i1] - s->uy[i0];
+    double bx = CORNER[k3][0] - CORNER[k][0] + s->ux[i2] - s->ux[i0];
+    double by = CORNER[k3][1] - CORNER[k][1] + s->uy[i2] - s->uy[i0];
+    if (g) {                                  /* dA/dp for p0, p1, p2 */
+        g[1][0] =  0.5 * by;  g[1][1] = -0.5 * bx;
+        g[2][0] = -0.5 * ay;  g[2][1] =  0.5 * ax;
+        g[0][0] = -g[1][0] - g[2][0];  g[0][1] = -g[1][1] - g[2][1];
+    }
+    return 0.5 * (ax * by - bx * ay);
+}
+
+static inline void barrier(const Sim *s, double A, double *b, double *db)
+{
+    const double Aon = 0.5 * s->p.orient_floor, kap = s->p.orient_kappa;
+    if (A >= Aon) { *b = 0; *db = 0; return; }
+    if (A <= 0)   { *b = INFINITY; *db = -INFINITY; return; }
+    double d = Aon - A;
+    *b  =  kap * d * d / (A * Aon);
+    *db = -kap * (Aon * Aon - A * A) / (Aon * A * A);
+}
+
+static void build_cells(Sim *s)
+{
+    const int C = s->cols, R = s->rows, per = s->p.bc == BC_PERIODIC;
+    s->ncells = 0;
+    for (int r = 0; r < (per ? R : R - 1); r++)
+        for (int c = 0; c < (per ? C : C - 1); c++) {
+            int c1 = (c + 1) % C, r1 = (r + 1) % R;
+            int *cn = &s->cell[4 * s->ncells++];
+            cn[0] = sim_idx(s, c, r);  cn[1] = sim_idx(s, c1, r);
+            cn[2] = sim_idx(s, c1, r1); cn[3] = sim_idx(s, c, r1);
+        }
+}
+
+int sim_valid(const Sim *s)
+{
+    if (s->p.bounded) {
+        const double D = s->p.bound_delta;
+        for (int k = 0; k < s->nspr; k++) {
+            const Spring *sp = &s->spr[k];
+            if (sp->rod) continue;
+            double dx = sp->rx + s->ux[sp->b] - s->ux[sp->a], dy = sp->ry + s->uy[sp->b] - s->uy[sp->a];
+            double e = sqrt(dx * dx + dy * dy) - sp->L0;
+            if (!(fabs(e) < D * (1.0 - 1e-9))) return 0;
+        }
+    }
+    if (s->p.orient)
+        for (int c = 0; c < s->ncells; c++)
+            for (int k = 0; k < 4; k++)
+                if (!(tri_area(s, &s->cell[4 * c], k, NULL) > 1e-12)) return 0;
+    return 1;
+}
+
+/* Was the substep that moved the lattice from (oux, ouy) to (ux, uy) fine
+ * enough near the walls?  Every bond may close at most half of its gap to
+ * the bound, and every triangle below A_on may lose at most half its area.
+ * This also implies validity, and it is what keeps Verlet accurate (and
+ * energy-conserving) when a bond comes close to its wall. */
+static int step_resolved(const Sim *s)
+{
+    if (s->p.bounded) {
+        const double D = s->p.bound_delta;
+        for (int k = 0; k < s->nspr; k++) {
+            const Spring *sp = &s->spr[k];
+            if (sp->rod) continue;
+            double x1 = sp->rx + s->ux[sp->b] - s->ux[sp->a], y1 = sp->ry + s->uy[sp->b] - s->uy[sp->a];
+            double e0 = s->exc[k], e1 = sqrt(x1 * x1 + y1 * y1) - sp->L0;
+            if (!(fabs(e1 - e0) <= 0.5 * (D - fabs(e0)))) return 0;
+        }
+    }
+    if (s->p.orient) {
+        const double Aon = 0.5 * s->p.orient_floor;
+        for (int c = 0; c < s->ncells; c++)
+            for (int k = 0; k < 4; k++) {
+                double A1 = tri_area(s, &s->cell[4 * c], k, NULL);
+                if (A1 < Aon && !(A1 > 0.5 * s->tarea[4 * c + k])) return 0;
+            }
+    }
+    return 1;
+}
+
+/* Highest local frequency set by the walls: sqrt(V'' (1/m_a + 1/m_b)) for
+ * bounded bonds, sqrt(b'' sum_j |dA/dp_j|^2 / m_j) for triangles below A_on,
+ * computed during the force pass.  Chooses the number of substeps before a
+ * step is attempted. */
+static double wall_omega(const Sim *s) { return sqrt(s->wall_w2); }   /* cached by the force pass */
 
 static void build_chains(Sim *s);
 
@@ -142,11 +265,12 @@ int sim_rebuild(Sim *s)
     double pe = 0;
     for (int k = 0; k < s->nspr; k++) {
         if (s->spr[k].rod) continue;
-        double len = sqrt(s->spr[k].rx * s->spr[k].rx + s->spr[k].ry * s->spr[k].ry);
-        double d = len - s->spr[k].L0;
-        pe += 0.5 * s->spr[k].k * d * d;
+        double len = sqrt(s->spr[k].rx * s->spr[k].rx + s->spr[k].ry * s->spr[k].ry), V, dV;
+        bond_law(s, &s->spr[k], len, &V, &dV);
+        pe += V;
     }
     s->pe_ref = pe;
+    build_cells(s);
 
     /* Gershgorin bound on omega_max^2 */
     double *row = calloc((size_t)s->n, sizeof *row);
@@ -155,8 +279,13 @@ int sim_rebuild(Sim *s)
             const Spring *sp = &s->spr[k];
             if (sp->rod) continue;
             double len = sqrt(sp->rx * sp->rx + sp->ry * sp->ry);
-            double t = sp->k * (len - sp->L0) / len;
-            double w = 2.0 * (sp->k + fabs(t));
+            double t = sp->k * (len - sp->L0) / len, keff = sp->k;
+            if (s->p.bounded) {
+                double x = (len - sp->L0) / s->p.bound_delta, g = 1 - x * x;
+                keff = sp->k * (1 + 3 * x * x) / (g * g * g);
+                t /= g * g;
+            }
+            double w = 2.0 * (keff + fabs(t));
             row[sp->a] += w; row[sp->b] += w;
         }
         double mx = 0;
@@ -175,7 +304,7 @@ int sim_rebuild(Sim *s)
     /* bring the current state onto the rod constraints; if the rods cannot
      * accommodate it, fall back to the reference state (which satisfies
      * every rod) and report that */
-    if (s->nrods && sim_project(s) > PROJ_TOL) {
+    if ((s->nrods && sim_project(s) > PROJ_TOL) || !sim_valid(s)) {
         memset(s->ux, 0, (size_t)s->n * sizeof(double));
         memset(s->uy, 0, (size_t)s->n * sizeof(double));
         memset(s->vx, 0, (size_t)s->n * sizeof(double));
@@ -202,8 +331,10 @@ void sim_update_damping(Sim *s)
                 if (R - 1 - r < d) d = R - 1 - r;
                 if (d < W) { double x = (double)(W - d) / W; g += p->absorb_gamma * x * x; }
             }
+            if (p->thermo) g += p->therm_gamma;
             s->gamma[i] = g;
             s->decay[i] = exp(-g * p->dt * 0.5 * s->inv_m[i]);
+            s->noise[i] = p->thermo ? sqrt(p->temp * s->inv_m[i] * (1.0 - s->decay[i] * s->decay[i])) : 0.0;
         }
 }
 
@@ -225,9 +356,18 @@ void sim_compute_forces(Sim *s)
     const int n = s->n;
     double *ux = s->ux, *uy = s->uy, *ax = s->ax, *ay = s->ay;
 
+    double wmax2 = 0;
     for (int i = 0; i < n; i++) {
         ax[i] = -s->anchor_k[i] * ux[i];
         ay[i] = -s->anchor_k[i] * uy[i];
+    }
+    if (s->held >= 0 && s->drag_soft) {       /* mouse spring */
+        int h = s->held;
+        double kd = 10.0 * s->p.k, cd = 2.0 * sqrt(kd * s->m[h]);
+        double dx = s->held_ux - ux[h], dy = s->held_uy - uy[h], d = sqrt(dx * dx + dy * dy);
+        if (d > 1.0) { dx /= d; dy /= d; }
+        ax[h] += kd * dx + cd * (s->held_vx - s->vx[h]);
+        ay[h] += kd * dy + cd * (s->held_vy - s->vy[h]);
     }
     for (int k = 0; k < s->nspr; k++) {
         const Spring *sp = &s->spr[k];
@@ -237,17 +377,61 @@ void sim_compute_forces(Sim *s)
         double dy = sp->ry + uy[b] - uy[a];
         double dist = sqrt(dx * dx + dy * dy);
         if (dist < 1e-12) continue;
-        double f = sp->k * (dist - sp->L0) / dist;
+        double V, dV;
+        bond_law(s, sp, dist, &V, &dV);
+        if (!isfinite(dV)) continue;             /* past a wall: the step is rejected anyway */
+        if (s->p.bounded) {
+            double e = dist - sp->L0, x = e / s->p.bound_delta, g = 1 - x * x;
+            double w2 = sp->k * (1 + 3 * x * x) / (g * g * g) * (s->inv_m[a] + s->inv_m[b]);
+            s->exc[k] = e;
+            if (w2 > wmax2) wmax2 = w2;
+        }
+        double f = dV / dist;
         double fx = f * dx, fy = f * dy;
         ax[a] += fx; ay[a] += fy;
         ax[b] -= fx; ay[b] -= fy;
     }
+    if (s->p.orient)
+        for (int c = 0; c < s->ncells; c++) {
+            const int *cn = &s->cell[4 * c];
+            for (int k = 0; k < 4; k++) {
+                double g[3][2], b, db;
+                double A = tri_area(s, cn, k, g);
+                s->tarea[4 * c + k] = A;
+                barrier(s, A, &b, &db);
+                if (db == 0.0 || !isfinite(db)) continue;
+                int id[3] = { cn[k], cn[(k + 1) & 3], cn[(k + 3) & 3] };
+                double sum = 0;
+                for (int j = 0; j < 3; j++) {
+                    ax[id[j]] -= db * g[j][0]; ay[id[j]] -= db * g[j][1];
+                    sum += (g[j][0] * g[j][0] + g[j][1] * g[j][1]) * s->inv_m[id[j]];
+                }
+                double w2 = 2.0 * s->p.orient_kappa * 0.5 * s->p.orient_floor / (A * A * A) * sum;
+                if (w2 > wmax2) wmax2 = w2;
+            }
+        }
+    s->wall_w2 = wmax2;
     for (int i = 0; i < n; i++) { ax[i] *= s->inv_m[i]; ay[i] *= s->inv_m[i]; }
 }
 
-static void damp_half(Sim *s)
+/* O half-step: exact drag over dt/2, plus thermostat noise.  For the
+ * nominal dt the factors are precomputed; substeps compute their own. */
+static void damp_half(Sim *s, double dt)
 {
-    for (int i = 0; i < s->n; i++) { s->vx[i] *= s->decay[i]; s->vy[i] *= s->decay[i]; }
+    const int nominal = dt == s->p.dt, thermo = s->p.thermo;
+    for (int i = 0; i < s->n; i++) {
+        if (s->fixed[i]) continue;
+        double c = nominal ? s->decay[i] : exp(-s->gamma[i] * dt * 0.5 * s->inv_m[i]);
+        s->vx[i] *= c; s->vy[i] *= c;
+        if (thermo) {
+            /* unit-variance uniform noise, sqrt(3) U[-1,1]: each step adds a
+             * tiny kick (1 - c ~ 1e-3), so over the relaxation time the sum is
+             * Gaussian by the central limit theorem; equipartition is tested */
+            double sg = (nominal ? s->noise[i] : sqrt(s->p.temp * s->inv_m[i] * (1.0 - c * c))) * 1.7320508075688772;
+            s->vx[i] += sg * rng_sym(&s->rng);
+            s->vy[i] += sg * rng_sym(&s->rng);
+        }
+    }
 }
 
 /* ───────────────────────────────────────────────────────── rods ──
@@ -492,46 +676,97 @@ double sim_project(Sim *s)
     return worst;
 }
 
-void sim_step(Sim *s)
+#define SUB_MAXDEPTH 10         /* up to 1024 substeps per step (only near walls) */
+
+/* one integration step of length dt; returns -1 if it would cross a wall or
+ * SHAKE cannot close (the caller restores the step-start state) */
+static int substep(Sim *s, double dt)
 {
-    const double dt = s->p.dt, h = 0.5 * dt;
+    const double h = 0.5 * dt;
     const int n = s->n, held = s->held;
 
-    if (s->nrods) {
-        snapshot(s);
+    if (s->nrods || s->p.bounded || s->p.orient) {
         memcpy(s->oux, s->ux, (size_t)n * sizeof(double));
         memcpy(s->ouy, s->uy, (size_t)n * sizeof(double));
     }
-    damp_half(s);
+    damp_half(s, dt);
     for (int i = 0; i < n; i++) {
-        if (s->fixed[i] || i == held) continue;
+        if (s->fixed[i] || kinematic(s, i)) continue;
         s->vx[i] += h * s->ax[i];  s->vy[i] += h * s->ay[i];
         s->ux[i] += dt * s->vx[i]; s->uy[i] += dt * s->vy[i];
     }
-    if (held >= 0) {
+    if (held >= 0 && !s->drag_soft) {
         s->ux[held] = s->held_ux; s->uy[held] = s->held_uy;
         s->vx[held] = s->held_vx; s->vy[held] = s->held_vy;
     }
-    if (s->nrods && shake(s, dt)) {
-        /* blocked: undo the step, stop the dragged node where it was */
-        restore(s);
-        for (int k = 0; k < s->nspr; k++) s->spr[k].f = 0.0;   /* failed solve: no valid forces */
-        s->rod_blocked = 1;
-        if (held >= 0) { s->held_ux = s->ux[held]; s->held_uy = s->uy[held]; }
-        s->steps++;
-        s->t = s->steps * dt;
-        return;
-    }
-    s->rod_blocked = 0;
+    if (s->nrods && shake(s, dt)) return -1;
+    if ((s->p.bounded || s->p.orient) && !step_resolved(s)) return -1;
     sim_compute_forces(s);
     for (int i = 0; i < n; i++) {
-        if (s->fixed[i] || i == held) continue;
+        if (s->fixed[i] || kinematic(s, i)) continue;
         s->vx[i] += h * s->ax[i]; s->vy[i] += h * s->ay[i];
     }
-    damp_half(s);
-    if (held >= 0) { s->vx[held] = s->held_vx; s->vy[held] = s->held_vy; }
+    damp_half(s, dt);
+    if (held >= 0 && !s->drag_soft) { s->vx[held] = s->held_vx; s->vy[held] = s->held_vy; }
     if (s->nrods) solve_velocities(s);
+    return 0;
+}
 
+static void save_full(Sim *s)
+{
+    size_t b = (size_t)s->n * sizeof(double);
+    memcpy(s->sx, s->ux, b);  memcpy(s->sy, s->uy, b);
+    memcpy(s->svx, s->vx, b); memcpy(s->svy, s->vy, b);
+    memcpy(s->sax, s->ax, b); memcpy(s->say, s->ay, b);
+}
+
+static void restore_full(Sim *s)
+{
+    size_t b = (size_t)s->n * sizeof(double);
+    memcpy(s->ux, s->sx, b);  memcpy(s->uy, s->sy, b);
+    memcpy(s->vx, s->svx, b); memcpy(s->vy, s->svy, b);
+    memcpy(s->ax, s->sax, b); memcpy(s->ay, s->say, b);
+}
+
+void sim_step(Sim *s)
+{
+    const double dt = s->p.dt;
+    const int guarded = s->nrods || s->p.bounded || s->p.orient;
+    int depth = 0, ok = 1;
+
+    int depth0 = 0;
+    if (guarded) {
+        save_full(s);
+        /* resolve the stiffest wall: omega_loc * dt_sub <= 0.1 */
+        if (s->p.bounded || s->p.orient) {
+            double need = wall_omega(s) * dt / 0.1;
+            while (depth0 < SUB_MAXDEPTH && (double)(1 << depth0) < need) depth0++;
+        }
+    }
+    for (depth = depth0; depth <= (guarded ? SUB_MAXDEPTH : 0); depth++) {
+        int nsub = 1 << depth;
+        ok = 1;
+        for (int k = 0; k < nsub && ok; k++) if (substep(s, dt / nsub)) ok = 0;
+        if (ok) break;
+        restore_full(s);
+        if (s->p.bounded || s->p.orient) sim_compute_forces(s);   /* refresh the wall caches */
+    }
+    s->sub_depth = ok ? depth : SUB_MAXDEPTH;
+    s->rod_blocked = !ok;
+    if (!ok) {
+        /* even 1024 substeps cannot resolve the wall.  A drag into an impossible
+         * configuration is refused: keep the step-start state and stop the
+         * dragged node where it is.  Free motion must not freeze: reverse
+         * every velocity (an exact time reversal, energy unchanged), so the
+         * lattice retraces its path away from the wall. */
+        for (int k = 0; k < s->nspr; k++) s->spr[k].f = 0.0;
+        if (s->held >= 0 && !s->drag_soft) { s->held_ux = s->ux[s->held]; s->held_uy = s->uy[s->held]; }
+        else {
+            for (int i = 0; i < s->n; i++) { s->vx[i] = -s->vx[i]; s->vy[i] = -s->vy[i]; }
+            s->reversals++;
+            s->rod_blocked = 0;
+        }
+    }
     s->steps++;
     s->t = s->steps * dt;
 }
@@ -548,18 +783,47 @@ void sim_energy(const Sim *s, double *ke, double *pe)
         if (sp->rod) continue;
         double dx = sp->rx + s->ux[sp->b] - s->ux[sp->a];
         double dy = sp->ry + s->uy[sp->b] - s->uy[sp->a];
-        double d = sqrt(dx * dx + dy * dy) - sp->L0;
-        v += 0.5 * sp->k * d * d;
+        double V, dV;
+        bond_law(s, sp, sqrt(dx * dx + dy * dy), &V, &dV);
+        v += V;
     }
+    if (s->p.orient)
+        for (int c = 0; c < s->ncells; c++)
+            for (int q = 0; q < 4; q++) {
+                double b, db;
+                barrier(s, tri_area(s, &s->cell[4 * c], q, NULL), &b, &db);
+                v += b;
+            }
     *ke = k; *pe = v - s->pe_ref;
+}
+
+double sim_lindemann(const Sim *s)
+{
+    double sum = 0; int n = 0;
+    for (int j = 0; j < s->nspr; j++) {
+        const Spring *sp = &s->spr[j];
+        if (sp->rx != 0 && sp->ry != 0) continue;          /* nearest neighbours only */
+        double dx = s->ux[sp->b] - s->ux[sp->a], dy = s->uy[sp->b] - s->uy[sp->a];
+        sum += dx * dx + dy * dy; n++;
+    }
+    return n ? sqrt(sum / n) : 0.0;
 }
 
 void sim_lattice(const Sim *s, Lattice *L)
 {
     double e = s->prestrain_eff;
-    L->k = s->p.k; L->kd = s->p.kdiag; L->diag = s->p.diagonal;
-    L->tc = s->p.rod_card ? 0.0 : s->p.k * e;      /* T/|r| = k(|r| - L0)/|r| = k e */
-    L->td = s->p.rod_diag ? 0.0 : s->p.kdiag * e;  /* rods carry no stored tension  */
+    double kc = s->p.k, kd = s->p.kdiag, tc = s->p.k * e, td = s->p.kdiag * e;
+    if (s->p.bounded) {
+        /* linearise V about the reference length: k_eff = V'', T = V' */
+        double D = s->p.bound_delta;
+        double xc = e / D, gc = 1 - xc * xc;                   /* |r| = 1      */
+        double xd = sqrt(2.0) * e / D, gd = 1 - xd * xd;       /* |r| = sqrt 2 */
+        kc *= (1 + 3 * xc * xc) / (gc * gc * gc);  tc /= gc * gc;
+        kd *= (1 + 3 * xd * xd) / (gd * gd * gd);  td /= gd * gd;
+    }
+    L->k = kc; L->kd = kd; L->diag = s->p.diagonal;
+    L->tc = s->p.rod_card ? 0.0 : tc;      /* T/|r| */
+    L->td = s->p.rod_diag ? 0.0 : td;      /* rods carry no stored tension */
     L->rod_card = s->p.rod_card; L->rod_diag = s->p.rod_diag;
     L->m = sim_mean_mass(s);
 }
@@ -620,17 +884,23 @@ static void restore(Sim *s)
 int sim_displace(Sim *s, int i, double dx, double dy)
 {
     if (i < 0 || i >= s->n || s->fixed[i]) return -1;
+    if (s->p.bounded) {                          /* keep a pluck inside the wall */
+        double d = sqrt(dx * dx + dy * dy), cap = 0.8 * s->p.bound_delta;
+        if (d > cap) { dx *= cap / d; dy *= cap / d; }
+    }
     snapshot(s);
     s->ux[i] += dx; s->uy[i] += dy;
     s->vx[i] = s->vy[i] = 0.0;
     if (s->nrods) {
         /* move the plucked node first, then let the rods drag its
          * neighbours along: hold it while projecting */
-        int keep = s->held; s->held = i;
+        int keep = s->held, soft = s->drag_soft;
+        s->held = i; s->drag_soft = 0;
         double r = sim_project(s);
-        s->held = keep;
+        s->held = keep; s->drag_soft = soft;
         if (r > PROJ_TOL) { restore(s); return -1; }
     }
+    if (!sim_valid(s)) { restore(s); return -1; }
     sim_compute_forces(s);
     return 0;
 }
@@ -681,7 +951,7 @@ int sim_excite_mode(Sim *s, int branch, double strain)
         sim_compute_forces(s);
         return -1;
     }
-    if (s->nrods && sim_project(s) > PROJ_TOL) {
+    if ((s->nrods && sim_project(s) > PROJ_TOL) || !sim_valid(s)) {
         memset(s->ux, 0, (size_t)s->n * sizeof(double));
         memset(s->uy, 0, (size_t)s->n * sizeof(double));
         sim_compute_forces(s);

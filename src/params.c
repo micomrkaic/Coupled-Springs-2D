@@ -24,6 +24,10 @@ void params_default(Params *p)
         .disorder_width = 0.5,
         .absorb = 0, .absorb_width = 10, .absorb_gamma = -1.0,
         .fput_strain = 0.15,
+        .bounded = 0, .bound_delta = 0.3,
+        .orient = 0, .orient_floor = 0.5, .orient_kappa = -1.0,
+        .thermo = 0, .temp = 0.5, .therm_gamma = -1.0,
+        .kick_scale = 1.0,
         .nt = 256,
         .seed = 0,
         .win_w = 0, .win_h = 0,
@@ -66,6 +70,17 @@ static void usage(const char *argv0)
 "      --nt N              time samples for omega-q, pow2  (256)\n"
 "      --seed N            RNG seed                        (time)\n"
 "\n"
+"Crystal model\n"
+"      --bounded           bounded bonds: |r - L0| < delta, V = k e^2/2/(1-(e/delta)^2)\n"
+"      --bound-delta D     maximum bond excursion          (0.3)\n"
+"      --orient            cell-orientation barrier: cells cannot fold over\n"
+"      --orient-floor F    barrier acts below F x rest area (0.5)\n"
+"      --orient-kappa K    barrier strength, J             (= k)\n"
+"      --thermostat        Langevin thermostat on\n"
+"      --temp T            k_B T, J                        (0.5)\n"
+"      --therm-gamma G     thermostat friction, kg/s       (0.1*sqrt(k*m))\n"
+"      --kick-scale S      scale pluck and kick amplitudes (1.0)\n"
+"\n"
 "Window\n"
 "      --width W           initial window width, points    (auto)\n"
 "      --height H          initial window height, points   (auto)\n"
@@ -89,7 +104,7 @@ static int parse_dbl(const char *s, double *out)
 
 enum {
     O_KDIAG = 256, O_NODIAG, O_PRESTRAIN, O_DT, O_DISORDER, O_DLIGHT, O_DHEAVY,
-    O_DWIDTH, O_ROD_C, O_ROD_D, O_ABSORB, O_AWIDTH, O_AGAMMA, O_FPUT, O_NT, O_SEED, O_WIDTH, O_HEIGHT
+    O_DWIDTH, O_ROD_C, O_ROD_D, O_BOUNDED, O_BOUNDD, O_ORIENT, O_ORF, O_ORK, O_THERMO, O_TEMP, O_TGAM, O_KICK, O_ABSORB, O_AWIDTH, O_AGAMMA, O_FPUT, O_NT, O_SEED, O_WIDTH, O_HEIGHT
 };
 
 int params_parse(Params *p, int argc, char **argv)
@@ -103,6 +118,15 @@ int params_parse(Params *p, int argc, char **argv)
         { "no-diag",        no_argument,       0, O_NODIAG },
         { "rod-cardinal",   no_argument,       0, O_ROD_C },
         { "rod-diagonal",   no_argument,       0, O_ROD_D },
+        { "bounded",           no_argument,       0, O_BOUNDED },
+        { "bound-delta",     required_argument, 0, O_BOUNDD },
+        { "orient",         no_argument,       0, O_ORIENT },
+        { "orient-floor",   required_argument, 0, O_ORF },
+        { "orient-kappa",   required_argument, 0, O_ORK },
+        { "thermostat",     no_argument,       0, O_THERMO },
+        { "temp",           required_argument, 0, O_TEMP },
+        { "therm-gamma",    required_argument, 0, O_TGAM },
+        { "kick-scale",     required_argument, 0, O_KICK },
         { "bc",             required_argument, 0, 'b' },
         { "prestrain",      required_argument, 0, O_PRESTRAIN },
         { "damping",        required_argument, 0, 'g' },
@@ -135,6 +159,15 @@ int params_parse(Params *p, int argc, char **argv)
         case O_NODIAG:    p->diagonal = 0; break;
         case O_ROD_C:     p->rod_card = 1; break;
         case O_ROD_D:     p->rod_diag = 1; break;
+        case O_BOUNDED:      p->bounded = 1; break;
+        case O_BOUNDD:     bad |= parse_dbl(optarg, &p->bound_delta); break;
+        case O_ORIENT:    p->orient = 1; break;
+        case O_ORF:       bad |= parse_dbl(optarg, &p->orient_floor); break;
+        case O_ORK:       bad |= parse_dbl(optarg, &p->orient_kappa); break;
+        case O_THERMO:    p->thermo = 1; break;
+        case O_TEMP:      bad |= parse_dbl(optarg, &p->temp); break;
+        case O_TGAM:      bad |= parse_dbl(optarg, &p->therm_gamma); break;
+        case O_KICK:      bad |= parse_dbl(optarg, &p->kick_scale); break;
         case 'b': {
             int found = 0;
             for (int i = 0; i < BC_COUNT; i++)
@@ -171,6 +204,8 @@ int params_parse(Params *p, int argc, char **argv)
 
     if (p->kdiag < 0) p->kdiag = p->k;
     if (p->absorb_gamma < 0) p->absorb_gamma = sqrt(p->k * p->mass);
+    if (p->orient_kappa < 0) p->orient_kappa = p->k;
+    if (p->therm_gamma < 0)  p->therm_gamma = 0.1 * sqrt(p->k * p->mass);
     if (!seed_given) p->seed = (unsigned)time(NULL);
 
     const char *err = NULL;
@@ -185,6 +220,12 @@ int params_parse(Params *p, int argc, char **argv)
     else if (p->disorder_width < 0 || p->disorder_width >= 1) err = "disorder width must be in [0, 1)";
     else if (p->absorb_width < 1) err = "absorb width must be >= 1";
     else if (p->nt < 16 || (p->nt & (p->nt - 1))) err = "nt must be a power of two >= 16";
+    else if (p->bound_delta <= 0 || p->bound_delta >= 1) err = "bound delta must be in (0, 1)";
+    else if (p->bounded && p->prestrain >= 0.9 * p->bound_delta) err = "prestrain must stay well inside the bound delta";
+    else if (p->orient_floor <= 0 || p->orient_floor >= 1) err = "orient floor must be in (0, 1)";
+    else if (p->orient_kappa <= 0) err = "orient kappa must be positive";
+    else if (p->temp < 0 || p->therm_gamma < 0) err = "temperature and thermostat friction must be >= 0";
+    else if (p->kick_scale <= 0 || p->kick_scale > 10) err = "kick scale must be in (0, 10]";
     if (err) { fprintf(stderr, "%s\n", err); return -1; }
     return 0;
 }
