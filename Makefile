@@ -3,7 +3,12 @@
 #   make            optimised build        ->  ./spring_grid
 #   make debug      ASan + UBSan build      ->  ./spring_grid_debug
 #   make test       headless physics tests (no SDL needed)
+#   make install    binary -> ~/.local/bin, man page -> ~/.local/share/man/man1
+#   make uninstall  remove both
 #   make clean
+#
+# Install location: override PREFIX (e.g. make install PREFIX=/usr/local);
+# DESTDIR is honoured for staged installs.
 
 CC     ?= cc
 TARGET  = spring_grid
@@ -32,7 +37,13 @@ WARN    = -std=c17 -Wall -Wextra -Wpedantic
 RFLAGS  = -O2
 DFLAGS  = -O0 -g3 -fsanitize=address,undefined
 
-.PHONY: all debug test clean check-sdl
+# ── install locations ─────────────────────────────────────────────────────────
+PREFIX  ?= $(HOME)/.local
+BINDIR   = $(DESTDIR)$(PREFIX)/bin
+MANDIR   = $(DESTDIR)$(PREFIX)/share/man/man1
+MANPAGE  = man/spring_grid.1
+
+.PHONY: all debug test clean check-sdl install uninstall
 
 all: $(TARGET)
 
@@ -52,6 +63,19 @@ tests/test_sim: tests/test_sim.c $(CORE) $(HDRS)
 
 test: tests/test_sim
 	./tests/test_sim
+
+install: $(TARGET) $(MANPAGE)
+	install -d $(BINDIR) $(MANDIR)
+	install -m 755 $(TARGET) $(BINDIR)/$(TARGET)
+	install -m 644 $(MANPAGE) $(MANDIR)/spring_grid.1
+	@echo "installed $(BINDIR)/$(TARGET)"
+	@echo "installed $(MANDIR)/spring_grid.1"
+	@case ":$$PATH:" in *":$(PREFIX)/bin:"*) ;; \
+	  *) echo "note: $(PREFIX)/bin is not on your PATH; add  export PATH=\"$(PREFIX)/bin:\$$PATH\"  to your shell rc" ;; esac
+
+uninstall:
+	rm -f $(BINDIR)/$(TARGET) $(MANDIR)/spring_grid.1
+	@echo "removed $(BINDIR)/$(TARGET) and $(MANDIR)/spring_grid.1"
 
 clean:
 	rm -f $(TARGET) $(TARGET)_debug tests/test_sim

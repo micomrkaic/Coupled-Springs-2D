@@ -1,0 +1,351 @@
+.\" spring_grid(1) - 2-D spring-mass lattice simulator
+.\" Copyright (C) 2026 Mico Mrkaic.  GPL-3.0-or-later.
+.TH SPRING_GRID 1 2026-10-29 "spring_grid" "User Commands"
+.SH NAME
+spring_grid \- real-time 2-D spring-mass lattice with spectral diagnostics
+.SH SYNOPSIS
+.B spring_grid
+.RI [ options ]
+.SH DESCRIPTION
+.B spring_grid
+simulates an N\(muM grid of point masses joined by cardinal and
+(optionally) diagonal bonds, and draws it in an SDL2 window together with a
+spectral panel.
+Each bond family can be a Hookean spring or a rigid rod.
+.PP
+The lattice can be perturbed with the mouse and keyboard, switched between
+four boundary conditions, prestressed, given mass defects or disorder, and
+surrounded by an absorbing layer.
+The spectral panel shows mode occupation, the space\-time dispersion
+S(q,\ \(*w) with the analytic branches overlaid, mode energies over time,
+and kinetic, potential and total energy.
+.PP
+All quantities are in lattice units: the rest spacing is
+.IR a\ =\ 1 ,
+time is in seconds, masses in kg, spring constants in N per lattice unit.
+.SH OPTIONS
+.SS Lattice
+.TP
+.BR \-c ", " \-\-cols " \fIN\fR"
+Number of columns, 4\(en1024.
+Default 64.
+.TP
+.BR \-r ", " \-\-rows " \fIN\fR"
+Number of rows, 4\(en1024.
+Default 64.
+.TP
+.BR \-m ", " \-\-mass " \fIM\fR"
+Node mass.
+Default 1.0.
+.TP
+.BR \-k ", " \-\-k " \fIK\fR"
+Cardinal spring constant.
+Default 400.
+.TP
+.BI \-\-kdiag " K"
+Diagonal spring constant.
+Default: equal to
+.IR k .
+The long-wave elastic response is isotropic only when
+.IR k\ =\ 2k_d .
+.TP
+.B \-\-no\-diag
+Start with the diagonal bonds off.
+.TP
+.B \-\-rod\-cardinal
+Make the cardinal bonds rigid rods (holonomic constraints enforced with
+RATTLE).
+.TP
+.B \-\-rod\-diagonal
+Make the diagonal bonds rigid rods.
+.TP
+.BR \-b ", " \-\-bc " \fINAME\fR"
+Boundary condition:
+.BR free ,
+.BR pinned ,
+.BR clamped
+or
+.BR periodic .
+Default
+.BR free .
+Periodic requires even
+.I cols
+and
+.IR rows .
+.TP
+.BI \-\-prestrain " E"
+Spring rest length
+.IR L0\ =\ (1\-E)|r| ,
+0\ \(<=\ E\ <\ 0.5.
+Takes effect only under clamped and periodic boundaries; rods keep their
+reference length.
+Default 0.
+.SS Dynamics
+.TP
+.BR \-g ", " \-\-damping " \fIG\fR"
+Uniform linear drag \(*g in kg/s.
+Default 0.4.
+.TP
+.BI \-\-dt " DT"
+Integration step in seconds.
+Default 5e\-4.
+The program warns if \(*w_max\(*Dt exceeds 0.5.
+With rods, which do not limit the step, 2e\-3 is usually fine.
+.TP
+.BR \-s ", " \-\-speed " \fIS\fR"
+Simulated seconds per wall-clock second, up to 64.
+Default 1.
+.SS "Disorder and boundaries"
+.TP
+.BI \-\-disorder " NAME"
+Mass distribution:
+.BR none ,
+.B light
+(a light defect at the centre),
+.B heavy
+(a heavy defect at the centre) or
+.B random
+(every mass random).
+Default
+.BR none .
+.TP
+.BI \-\-defect\-light " F"
+Mass ratio of the light defect.
+Default 0.2.
+.TP
+.BI \-\-defect\-heavy " F"
+Mass ratio of the heavy defect.
+Default 5.
+.TP
+.BI \-\-disorder\-width " W"
+Random masses are
+.IR m(1+W\(*xU[\-1,1]) ,
+0\ \(<=\ W\ <\ 1.
+Default 0.5.
+.TP
+.B \-\-absorb
+Start with the absorbing layer on.
+.TP
+.BI \-\-absorb\-width " N"
+Absorbing layer thickness in nodes.
+Default 10.
+.TP
+.BI \-\-absorb\-gamma " G"
+Peak extra drag in the layer; the profile is quadratic in depth.
+Default
+.RI \(sr( km ).
+.SS Analysis
+.TP
+.BI \-\-fput\-strain " S"
+Peak strain of the mode set up by the
+.B F
+and
+.B Shift\-F
+keys.
+Default 0.15.
+.TP
+.BI \-\-nt " N"
+Number of time samples in the \(*w\-q window; a power of two, at least 16.
+Default 256.
+.TP
+.BI \-\-seed " N"
+Seed for the random number generator.
+Default: the current time.
+.SS Window
+.TP
+.BI \-\-width " W"
+.TQ
+.BI \-\-height " H"
+Initial window size in points.
+Default: 1200\(mu800, shrunk to fit the display.
+.TP
+.BR \-h ", " \-\-help
+Print a usage summary and exit.
+.SH KEYS AND MOUSE
+.TP 12
+.B Left\-drag
+Grab a mass and pull it; release to throw.
+The mass follows the pointer smoothly; the release velocity is a
+least-squares fit over the last 80\ ms of pointer motion.
+.TP
+.B Right\-click
+Random velocity kick, with net momentum removed (free and periodic) and net
+angular momentum removed (free).
+.TP
+.B Space
+Pluck the centre mass.
+.TP
+.B G
+Large random kick.
+.TP
+.B R
+Reset to the rest lattice.
+.TP
+.B B
+Cycle boundary condition: free, pinned, clamped, periodic.
+.TP
+.B D
+Diagonal bonds on/off.
+.TP
+.B C
+Cardinal bonds: springs \(<> rigid rods.
+.TP
+.B X
+Diagonal bonds: springs \(<> rigid rods.
+.TP
+.B T
+Cycle prestrain: 0, 2, 5, 10%.
+.TP
+.B M
+Cycle masses: uniform, light defect, heavy defect, random.
+.TP
+.B A
+Absorbing layer on/off.
+.TP
+.BR + " / " \-
+Multiply / divide the damping by 1.25; below 0.001 it becomes 0.
+.TP
+.B 0
+Damping off, or restore the previous value.
+.TP
+.B F
+FPUT preset: periodic boundary, diagonal springs, no tension, damping,
+absorber or rods; excite the lowest longitudinal mode at
+.B \-\-fput\-strain
+and run at 4\(mu speed.
+.TP
+.B Shift\-F
+Excite the lowest mode of the selected branch with the current settings.
+.TP
+.BR Tab " / " Shift\-Tab
+Next / previous spectral view.
+.TP
+.B V
+Branch shown: L, T, L+T.
+.TP
+.B P
+Pause.
+.TP
+.BR , " / " .
+Halve / double the simulation speed.
+.TP
+.B H
+Hide or show the help text.
+.TP
+.BR Q ", " Esc
+Quit.
+.SH SPECTRAL VIEWS
+.TP
+.B "1. Occupation"
+.RI | v_b(q) |\(S2,
+the spatial transform of the velocity field projected on branch
+.I b
+and exponentially averaged.
+It shows which modes carry energy, not their frequencies.
+.TP
+.B "2. Dispersion"
+.IR S_b(q_x,\ \(*w) :
+a Hann-windowed time Fourier transform of the last
+.I nt
+samples on the lowest-q_y line, normalised per q column, with the analytic
+\(*w_L(q) and \(*w_T(q) dashed.
+Read it after the "filling" counter reaches 100%.
+.TP
+.B "3. Mode energies"
+.IR E\ =\ (m/2)(P\(S2\ +\ \(*w\(S2Q\(S2)
+for the lowest eight x\-wavenumbers on the lowest-q_y line, against time.
+.TP
+.B "4. Energy"
+Kinetic, potential and total energy against time.
+The state panel also shows the relative drift dE/E while the system is
+conservative and undisturbed.
+.PP
+The spatial transform matches the boundary condition: DCT\-II for free and
+pinned, DST\-I on the interior for clamped, real-to-complex FFT for
+periodic.
+At each q the two components are projected onto the eigenvectors of the
+analytic dynamical matrix, labelled quasi-longitudinal (L) and
+quasi-transverse (T).
+.SH PHYSICS
+The integrator is velocity Verlet with exact drag applied in two half
+steps:
+.IR v\ \(<-\ v\ exp(\-\(*g\(*Dt/2m) .
+With \(*g\ =\ 0 it is symplectic and the energy error stays bounded.
+.PP
+Rigid rods enforce
+.IR |r+u_b\-u_a|\ =\ |r|
+with RATTLE.
+The rods of one family form straight chains; each chain's linearised
+constraints are tridiagonal and solved exactly, sweeping over chain families
+until every length is within about 5e\-9\ a.
+Rods store no energy.
+Each rod is coloured by its constraint force: red for tension, blue for
+compression.
+Under clamped or periodic boundaries cardinal rods lock the lattice
+completely; moves they forbid are refused and the state panel says so.
+.PP
+The README describes the dispersion relation, the boundary conditions and
+the FPUT preset in full.
+.SH ENVIRONMENT
+.TP
+.B SG_SCRIPT
+A semicolon-separated list of
+.IB frame : action\fR[\fB:\fIarg\fR]
+items run at the given frame numbers, for headless screenshots and smoke
+tests.
+The actions are:
+.RS
+.IP \(bu 2
+.BI key: name\fR[\fB+shift\fR]
+(an SDL key name);
+.IP \(bu 2
+.BI mdown: x,y\fR,
+.BI mmove: x,y
+and
+.BI mup: x,y
+(the left mouse button, in window points);
+.IP \(bu 2
+.BI shot: file.bmp\fR;
+.IP \(bu 2
+.BR quit .
+.RE
+.SH EXIT STATUS
+0 on normal exit or after
+.BR \-\-help ;
+1 if SDL or memory initialisation fails;
+2 for an invalid command line.
+.SH EXAMPLES
+.TP
+.B spring_grid \-c 32 \-r 32 \-\-bc periodic
+A smaller torus.
+.TP
+.B spring_grid \-\-bc clamped \-\-no\-diag \-\-prestrain 0.05
+A drum: tension gives the cardinal lattice transverse stiffness.
+.TP
+.B spring_grid \-\-disorder light \-\-absorb
+After a pluck (Space), the absorber removes everything except the energy
+trapped in the defect's local mode.
+.TP
+.B spring_grid \-\-kdiag 200
+The isotropic case: circular wavefronts, c_L/c_T\ =\ \(sr3.
+.TP
+.B spring_grid \-\-rod\-cardinal \-\-dt 2e\-3
+Rigid rows and columns coupled by diagonal springs, at about real time.
+.TP
+.B SG_SCRIPT="5:key:F;900:shot:fput.bmp;901:quit" xvfb\-run spring_grid
+Run the FPUT preset headlessly and save a screenshot.
+.SH SEE ALSO
+.BR sdl2\-config (1)
+.PP
+The project README and
+.B make test
+(headless checks of the integrator, the analytic dispersion, the rod
+solver and the spectral analysis).
+.SH AUTHORS
+Mico Mrkaic,
+.UR https://github.com/micomrkaic
+github.com/micomrkaic
+.UE .
+.SH COPYRIGHT
+GPL-3.0-or-later.
+There is NO WARRANTY, to the extent permitted by law.

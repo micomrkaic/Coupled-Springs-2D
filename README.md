@@ -64,8 +64,15 @@ The tests need FFTW only, not SDL.
 make          # optimised build             ->  ./spring_grid
 make debug    # ASan + UBSan build          ->  ./spring_grid_debug
 make test     # headless physics tests      ->  tests/test_sim
+make install  # ~/.local/bin/spring_grid + ~/.local/share/man/man1/spring_grid.1
+make uninstall
 make clean
 ```
+
+`make install PREFIX=/usr/local` installs system-wide (prefix it with `sudo`),
+and `DESTDIR` works for staged installs. On both Linux and macOS, `man` finds
+pages in `~/.local/share/man` automatically once `~/.local/bin` is on your
+`PATH`. Then run `man spring_grid`.
 
 ---
 
@@ -311,6 +318,7 @@ src/render.[ch]    SDL drawing (batched geometry), layout, panels
 src/font.[ch]      5x7 bitmap font
 src/main.c         window, event handling, fixed-timestep loop
 tests/test_sim.c   headless tests (make test)
+man/spring_grid.1  manual page (make install puts it in $PREFIX/share/man/man1)
 
 The rod solver (chains, Thomas algorithm, RATTLE) is in sim.c, after the
 integrator.
