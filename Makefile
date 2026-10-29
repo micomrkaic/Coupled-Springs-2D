@@ -1,50 +1,57 @@
 # Makefile — spring_grid
-# Supports Linux (sdl2-config) and macOS/Homebrew (Apple Silicon + Intel)
-# Usage: make / make debug / make clean
+# Linux (sdl2-config / pkg-config) and macOS/Homebrew (Apple Silicon + Intel)
+#   make            optimised build        ->  ./spring_grid
+#   make debug      ASan + UBSan build      ->  ./spring_grid_debug
+#   make test       headless physics tests (no SDL needed)
+#   make clean
 
-CC     = gcc
-TARGET = spring_grid
-SRC    = spring_grid.c
+CC     ?= cc
+TARGET  = spring_grid
 
-# ── locate sdl2-config ────────────────────────────────────────────────────────
-SDL2_CONFIG := $(shell \
-    command -v sdl2-config 2>/dev/null || \
-    ls /opt/homebrew/bin/sdl2-config 2>/dev/null || \
-    ls /usr/local/bin/sdl2-config 2>/dev/null)
+CORE    = src/params.c src/modes.c src/util.c src/sim.c src/spectrum.c
+GUI     = src/font.c src/render.c src/main.c
+HDRS    = $(wildcard src/*.h)
 
-ifeq ($(SDL2_CONFIG),)
-    $(error sdl2-config not found. Install SDL2: brew install sdl2  OR  apt install libsdl2-dev)
-endif
+# ── SDL2 ──────────────────────────────────────────────────────────────────────
+SDL2_CONFIG := $(shell command -v sdl2-config 2>/dev/null || \
+                 ls /opt/homebrew/bin/sdl2-config 2>/dev/null || \
+                 ls /usr/local/bin/sdl2-config 2>/dev/null)
+SDL2_CFLAGS  = $(shell $(SDL2_CONFIG) --cflags)
+SDL2_LIBS    = $(shell $(SDL2_CONFIG) --libs)
 
-SDL2_CFLAGS := $(shell $(SDL2_CONFIG) --cflags)
-SDL2_LIBS   := $(shell $(SDL2_CONFIG) --libs)
-
-# ── locate fftw3 ─────────────────────────────────────────────────────────────
+# ── FFTW3 ─────────────────────────────────────────────────────────────────────
 FFTW_CFLAGS := $(shell pkg-config --cflags fftw3 2>/dev/null || \
     ([ -f /opt/homebrew/include/fftw3.h ] && echo -I/opt/homebrew/include) || \
-    ([ -f /usr/local/include/fftw3.h   ] && echo -I/usr/local/include))
-
+    ([ -f /usr/local/include/fftw3.h    ] && echo -I/usr/local/include))
 FFTW_LIBS   := $(shell pkg-config --libs fftw3 2>/dev/null || \
-    ([ -f /opt/homebrew/lib/libfftw3.a ] && echo -L/opt/homebrew/lib -lfftw3) || \
+    ([ -f /opt/homebrew/include/fftw3.h ] && echo -L/opt/homebrew/lib -lfftw3) || \
+    ([ -f /usr/local/include/fftw3.h    ] && echo -L/usr/local/lib -lfftw3) || \
     echo -lfftw3)
 
-# ── flags ─────────────────────────────────────────────────────────────────────
-CFLAGS = -std=c17 -Wall -Wextra -Wpedantic $(SDL2_CFLAGS) $(FFTW_CFLAGS)
-LIBS   = $(SDL2_LIBS) $(FFTW_LIBS) -lm
+WARN    = -std=c17 -Wall -Wextra -Wpedantic
+RFLAGS  = -O2
+DFLAGS  = -O0 -g3 -fsanitize=address,undefined
 
-RFLAGS = -O2
-DFLAGS = -O0 -g3 -fsanitize=address,undefined
-
-# ── targets ───────────────────────────────────────────────────────────────────
-.PHONY: all debug clean
+.PHONY: all debug test clean check-sdl
 
 all: $(TARGET)
 
-$(TARGET): $(SRC)
-	$(CC) $(CFLAGS) $(RFLAGS) $< -o $@ $(LIBS)
+check-sdl:
+	@[ -n "$(SDL2_CONFIG)" ] || { echo "sdl2-config not found. Install SDL2: brew install sdl2  OR  apt install libsdl2-dev"; exit 1; }
 
-debug: $(SRC)
-	$(CC) $(CFLAGS) $(DFLAGS) $< -o $(TARGET)_debug $(LIBS)
+$(TARGET): $(CORE) $(GUI) $(HDRS) | check-sdl
+	$(CC) $(WARN) $(RFLAGS) $(SDL2_CFLAGS) $(FFTW_CFLAGS) $(CORE) $(GUI) -o $@ $(SDL2_LIBS) $(FFTW_LIBS) -lm
+
+$(TARGET)_debug: $(CORE) $(GUI) $(HDRS) | check-sdl
+	$(CC) $(WARN) $(DFLAGS) $(SDL2_CFLAGS) $(FFTW_CFLAGS) $(CORE) $(GUI) -o $@ $(SDL2_LIBS) $(FFTW_LIBS) -lm
+
+debug: $(TARGET)_debug
+
+tests/test_sim: tests/test_sim.c $(CORE) $(HDRS)
+	$(CC) $(WARN) $(RFLAGS) $(FFTW_CFLAGS) $(CORE) tests/test_sim.c -o $@ $(FFTW_LIBS) -lm
+
+test: tests/test_sim
+	./tests/test_sim
 
 clean:
-	rm -f $(TARGET) $(TARGET)_debug
+	rm -f $(TARGET) $(TARGET)_debug tests/test_sim
